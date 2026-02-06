@@ -143,6 +143,86 @@ describe("runCliAgent resume cleanup", () => {
   });
 });
 
+describe("extraSystemPromptOverride", () => {
+  beforeEach(() => {
+    runCommandWithTimeoutMock.mockReset();
+    runExecMock.mockReset();
+  });
+
+  it("claude-cli does not inject 'Tools are disabled' message", async () => {
+    runExecMock.mockResolvedValue({ stdout: "", stderr: "" });
+    runCommandWithTimeoutMock.mockResolvedValueOnce({
+      stdout: JSON.stringify({ result: "ok", session_id: "sess-1" }),
+      stderr: "",
+      code: 0,
+      signal: null,
+      killed: false,
+    });
+
+    await runCliAgent({
+      sessionId: "s1",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp",
+      prompt: "hello",
+      provider: "claude-cli",
+      model: "opus",
+      timeoutMs: 1_000,
+      runId: "run-override-1",
+    });
+
+    const callArgs = runCommandWithTimeoutMock.mock.calls[0]?.[0] as string[];
+    const systemPromptIdx = callArgs.indexOf("--append-system-prompt");
+    expect(systemPromptIdx).toBeGreaterThan(-1);
+    const systemPrompt = callArgs[systemPromptIdx + 1] ?? "";
+    expect(systemPrompt).not.toContain("Tools are disabled");
+  });
+
+  it("custom backend without extraSystemPromptOverride injects 'Tools are disabled'", async () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: {
+          cliBackends: {
+            "custom-cli": {
+              command: "my-tool",
+              args: ["-p"],
+              output: "text",
+              systemPromptArg: "--system",
+              systemPromptWhen: "always",
+            },
+          },
+        },
+      },
+    };
+
+    runExecMock.mockResolvedValue({ stdout: "", stderr: "" });
+    runCommandWithTimeoutMock.mockResolvedValueOnce({
+      stdout: "ok",
+      stderr: "",
+      code: 0,
+      signal: null,
+      killed: false,
+    });
+
+    await runCliAgent({
+      sessionId: "s1",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp",
+      config: cfg,
+      prompt: "hello",
+      provider: "custom-cli",
+      model: "default",
+      timeoutMs: 1_000,
+      runId: "run-override-2",
+    });
+
+    const callArgs = runCommandWithTimeoutMock.mock.calls[0]?.[0] as string[];
+    const systemIdx = callArgs.indexOf("--system");
+    expect(systemIdx).toBeGreaterThan(-1);
+    const systemPrompt = callArgs[systemIdx + 1] ?? "";
+    expect(systemPrompt).toContain("Tools are disabled");
+  });
+});
+
 describe("cleanupSuspendedCliProcesses", () => {
   beforeEach(() => {
     runExecMock.mockReset();

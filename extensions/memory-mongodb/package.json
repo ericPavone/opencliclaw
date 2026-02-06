@@ -1,0 +1,21 @@
+{
+  "name": "@openclaw/memory-mongodb",
+  "version": "2026.2.4",
+  "description": "MongoDB-backed structured knowledge management plugin with 5 collections",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48",
+    "mongodb": "^6.12.0"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.1.26"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

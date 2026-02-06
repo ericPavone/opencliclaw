@@ -1,0 +1,72 @@
+{
+  "id": "memory-mongodb",
+  "kind": "memory",
+  "uiHints": {
+    "uri": {
+      "label": "MongoDB URI",
+      "sensitive": true,
+      "placeholder": "mongodb://localhost:27017",
+      "help": "MongoDB connection string (or use ${MONGODB_URI})"
+    },
+    "database": {
+      "label": "Database Name",
+      "placeholder": "openclaw_memory"
+    },
+    "agentId": {
+      "label": "Agent ID",
+      "placeholder": "default",
+      "advanced": true
+    },
+    "tls.caFile": {
+      "label": "TLS CA File",
+      "advanced": true
+    },
+    "tls.certKeyFile": {
+      "label": "TLS Certificate Key File",
+      "advanced": true
+    },
+    "tls.allowInvalidCerts": {
+      "label": "Allow Invalid TLS Certificates",
+      "advanced": true
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically capture important information from conversations"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories into context"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "uri": {
+        "type": "string"
+      },
+      "database": {
+        "type": "string"
+      },
+      "agentId": {
+        "type": "string"
+      },
+      "tls": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "caFile": { "type": "string" },
+          "certKeyFile": { "type": "string" },
+          "allowInvalidCerts": { "type": "boolean" }
+        }
+      },
+      "autoCapture": {
+        "type": "boolean"
+      },
+      "autoRecall": {
+        "type": "boolean"
+      }
+    },
+    "required": ["uri"]
+  }
+}

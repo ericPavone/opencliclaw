@@ -78,10 +78,9 @@ export async function runCliAgent(params: {
   const normalizedModel = normalizeCliModel(modelId, backend);
   const modelDisplay = `${params.provider}/${modelId}`;
 
-  const extraSystemPrompt = [
-    params.extraSystemPrompt?.trim(),
-    "Tools are disabled in this session. Do not call tools.",
-  ]
+  const toolsDisabledMsg =
+    backend.extraSystemPromptOverride ?? "Tools are disabled in this session. Do not call tools.";
+  const extraSystemPrompt = [params.extraSystemPrompt?.trim(), toolsDisabledMsg || undefined]
     .filter(Boolean)
     .join("\n");
 
