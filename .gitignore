@@ -76,3 +76,4 @@ memory/
 .agent/
 .agents/
 .pi/
+.deploy/openclaw-deploy.tar.gz

@@ -4,6 +4,12 @@ export type TlsConfig = {
   allowInvalidCerts?: boolean;
 };
 
+export type RoutingConfig = {
+  enabled: boolean;
+  defaultTier: string;
+  cacheTtlMs: number;
+};
+
 export type MongoDBConfig = {
   uri: string;
   database: string;
@@ -11,9 +17,21 @@ export type MongoDBConfig = {
   tls?: TlsConfig;
   autoCapture: boolean;
   autoRecall: boolean;
+  dbFirst: boolean;
+  routing: RoutingConfig;
 };
 
-const ALLOWED_TOP_KEYS = ["uri", "database", "agentId", "tls", "autoCapture", "autoRecall"];
+const ALLOWED_TOP_KEYS = [
+  "uri",
+  "database",
+  "agentId",
+  "tls",
+  "autoCapture",
+  "autoRecall",
+  "dbFirst",
+  "routing",
+];
+const ALLOWED_ROUTING_KEYS = ["enabled", "defaultTier", "cacheTtlMs"];
 const ALLOWED_TLS_KEYS = ["caFile", "certKeyFile", "allowInvalidCerts"];
 
 function resolveEnvVars(value: string): string {
@@ -60,6 +78,20 @@ export const mongodbConfigSchema = {
       };
     }
 
+    let routing: RoutingConfig = { enabled: false, defaultTier: "heavy", cacheTtlMs: 60_000 };
+    if (cfg.routing != null) {
+      if (typeof cfg.routing !== "object" || Array.isArray(cfg.routing)) {
+        throw new Error("routing must be an object");
+      }
+      const rc = cfg.routing as Record<string, unknown>;
+      assertAllowedKeys(rc, ALLOWED_ROUTING_KEYS, "routing config");
+      routing = {
+        enabled: rc.enabled === true,
+        defaultTier: typeof rc.defaultTier === "string" ? rc.defaultTier : "heavy",
+        cacheTtlMs: typeof rc.cacheTtlMs === "number" && rc.cacheTtlMs > 0 ? rc.cacheTtlMs : 60_000,
+      };
+    }
+
     return {
       uri: resolveEnvVars(cfg.uri),
       database: typeof cfg.database === "string" ? cfg.database : "openclaw_memory",
@@ -67,6 +99,8 @@ export const mongodbConfigSchema = {
       tls,
       autoCapture: cfg.autoCapture !== false,
       autoRecall: cfg.autoRecall !== false,
+      dbFirst: cfg.dbFirst === true,
+      routing,
     };
   },
 };

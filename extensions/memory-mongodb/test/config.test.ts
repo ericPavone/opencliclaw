@@ -108,4 +108,44 @@ describe("mongodbConfigSchema.parse", () => {
     expect(cfg.autoCapture).toBe(false);
     expect(cfg.autoRecall).toBe(false);
   });
+
+  it("defaults routing to disabled with sensible defaults", () => {
+    const cfg = mongodbConfigSchema.parse({ uri: "mongodb://x" });
+    expect(cfg.routing).toEqual({
+      enabled: false,
+      defaultTier: "heavy",
+      cacheTtlMs: 60_000,
+    });
+  });
+
+  it("parses routing config", () => {
+    const cfg = mongodbConfigSchema.parse({
+      uri: "mongodb://x",
+      routing: { enabled: true, defaultTier: "mid", cacheTtlMs: 30000 },
+    });
+    expect(cfg.routing.enabled).toBe(true);
+    expect(cfg.routing.defaultTier).toBe("mid");
+    expect(cfg.routing.cacheTtlMs).toBe(30000);
+  });
+
+  it("throws on unknown routing keys", () => {
+    expect(() =>
+      mongodbConfigSchema.parse({ uri: "mongodb://x", routing: { enabled: true, bogus: true } }),
+    ).toThrow("unknown keys: bogus");
+  });
+
+  it("throws if routing is not an object", () => {
+    expect(() => mongodbConfigSchema.parse({ uri: "mongodb://x", routing: "yes" })).toThrow(
+      "routing must be an object",
+    );
+  });
+
+  it("defaults routing fields when partially specified", () => {
+    const cfg = mongodbConfigSchema.parse({
+      uri: "mongodb://x",
+      routing: { enabled: true },
+    });
+    expect(cfg.routing.defaultTier).toBe("heavy");
+    expect(cfg.routing.cacheTtlMs).toBe(60_000);
+  });
 });

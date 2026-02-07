@@ -3,14 +3,24 @@ import { Type } from "@sinclair/typebox";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { stringEnum } from "openclaw/plugin-sdk";
+import { registerBootstrapHook } from "./bootstrap-hook.js";
 import * as agentConfig from "./collections/agent-config.js";
 import * as guidelines from "./collections/guidelines.js";
 import * as memories from "./collections/memories.js";
+import {
+  getRoutingContext,
+  storeRoutingContext,
+  discoverModels,
+  mergeModelsIncremental,
+  computeModelsHash,
+  RoutingCache,
+} from "./collections/routing.js";
 import * as seeds from "./collections/seeds.js";
 import * as skills from "./collections/skills.js";
 import { mongodbConfigSchema } from "./config.js";
 import { MongoMemoryDB, ALL_COLLECTIONS, type CollectionName } from "./db.js";
 import { createMigrator } from "./migrate.js";
+import { resolveRoutingOverride } from "./routing.js";
 
 const COLLECTION_NAMES = ["memories", "guidelines", "seeds", "config", "skills"] as const;
 
@@ -929,6 +939,244 @@ const memoryMongoDBPlugin = {
             const deleted = await memories.prune(col);
             console.log(JSON.stringify({ deleted }, null, 2));
           });
+
+        // ====================================================================
+        // Routing Subcommands
+        // ====================================================================
+
+        const routingCmd = cmd.command("routing").description("Dynamic model routing management");
+
+        routingCmd
+          .command("status")
+          .description("Show routing context status")
+          .option("--agent-id <id>", "Agent ID")
+          .action(async (opts: { agentId?: string }) => {
+            const col = await db.getCollection("routing");
+            const doc = await getRoutingContext(col, opts.agentId ?? cfg.agentId);
+            if (!doc) {
+              console.log(
+                JSON.stringify(
+                  { status: "not_initialized", agentId: opts.agentId ?? cfg.agentId },
+                  null,
+                  2,
+                ),
+              );
+              return;
+            }
+            const activeModels = doc.models.filter((m) => m.active !== false);
+            const byTier: Record<string, string[]> = {};
+            for (const m of activeModels) {
+              (byTier[m.tier] ??= []).push(m.id);
+            }
+            console.log(
+              JSON.stringify(
+                {
+                  status: "active",
+                  agentId: doc.agent_id,
+                  version: doc.version,
+                  modelsHash: doc.models_hash,
+                  totalModels: doc.models.length,
+                  activeModels: activeModels.length,
+                  modelsByTier: byTier,
+                  rulesCount: doc.routing.rules.length,
+                  categories: Object.keys(doc.classification.categories),
+                  defaultTier: doc.routing.default_tier,
+                  updatedAt: doc.updated_at,
+                },
+                null,
+                2,
+              ),
+            );
+          });
+
+        routingCmd
+          .command("models")
+          .description("List discovered models with tier and capabilities")
+          .option("--agent-id <id>", "Agent ID")
+          .action(async (opts: { agentId?: string }) => {
+            const col = await db.getCollection("routing");
+            const doc = await getRoutingContext(col, opts.agentId ?? cfg.agentId);
+            if (!doc) {
+              console.error("Routing not initialized. Enable routing and restart the gateway.");
+              return;
+            }
+            const models = doc.models.map((m) => ({
+              id: m.id,
+              alias: m.alias,
+              tier: m.tier,
+              active: m.active !== false,
+              tools: m.capabilities.tools,
+              reasoning: m.capabilities.reasoning,
+              use_when: m.use_when.length > 0 ? m.use_when : undefined,
+              never_when: m.never_when.length > 0 ? m.never_when : undefined,
+            }));
+            console.log(JSON.stringify(models, null, 2));
+          });
+
+        routingCmd
+          .command("rules")
+          .description("Show active routing rules")
+          .option("--agent-id <id>", "Agent ID")
+          .action(async (opts: { agentId?: string }) => {
+            const col = await db.getCollection("routing");
+            const doc = await getRoutingContext(col, opts.agentId ?? cfg.agentId);
+            if (!doc) {
+              console.error("Routing not initialized.");
+              return;
+            }
+            console.log(
+              JSON.stringify(
+                {
+                  defaultTier: doc.routing.default_tier,
+                  ambiguousAction: doc.routing.ambiguous_action,
+                  rules: doc.routing.rules,
+                  escalation: doc.escalation,
+                },
+                null,
+                2,
+              ),
+            );
+          });
+
+        routingCmd
+          .command("set-tier")
+          .description("Change the tier of a model")
+          .requiredOption("--model <id>", "Model ID (e.g., google/gemini-3-pro)")
+          .requiredOption("--tier <tier>", "New tier (fast/mid/heavy)")
+          .option("--agent-id <id>", "Agent ID")
+          .action(async (opts: { model: string; tier: string; agentId?: string }) => {
+            const validTiers = ["fast", "mid", "heavy"];
+            if (!validTiers.includes(opts.tier)) {
+              console.error(`Invalid tier "${opts.tier}". Valid: ${validTiers.join(", ")}`);
+              return;
+            }
+            const col = await db.getCollection("routing");
+            const doc = await getRoutingContext(col, opts.agentId ?? cfg.agentId);
+            if (!doc) {
+              console.error("Routing not initialized.");
+              return;
+            }
+            const model = doc.models.find((m) => m.id === opts.model);
+            if (!model) {
+              console.error(
+                `Model "${opts.model}" not found. Available: ${doc.models.map((m) => m.id).join(", ")}`,
+              );
+              return;
+            }
+            const oldTier = model.tier;
+            model.tier = opts.tier as "fast" | "mid" | "heavy";
+            await storeRoutingContext(col, doc);
+            routingCache.invalidate(opts.agentId ?? cfg.agentId);
+            console.log(
+              JSON.stringify({ model: opts.model, oldTier, newTier: opts.tier }, null, 2),
+            );
+          });
+
+        routingCmd
+          .command("rediscover")
+          .description("Force re-discovery of models from config")
+          .option("--agent-id <id>", "Agent ID")
+          .action(async (opts: { agentId?: string }) => {
+            const agentId = opts.agentId ?? cfg.agentId;
+            const col = await db.getCollection("routing");
+            const existing = await getRoutingContext(col, agentId);
+
+            const seedUrl = new URL("../docs/db-snapshot/routing--default.json", import.meta.url);
+            const seedRaw = await fs.readFile(seedUrl, "utf-8");
+            const seed = JSON.parse(seedRaw);
+            const heuristics = seed.model_discovery?.tier_heuristics ?? {};
+
+            const discovered = discoverModels(api.config, agentId, heuristics);
+            const newHash = computeModelsHash(discovered);
+
+            if (!existing) {
+              await storeRoutingContext(col, {
+                agent_id: agentId,
+                version: seed.version ?? 5,
+                models: discovered,
+                models_hash: newHash,
+                model_discovery: seed.model_discovery,
+                classification: seed.classification,
+                routing: seed.routing,
+                escalation: seed.escalation,
+              });
+              console.log(
+                JSON.stringify(
+                  {
+                    action: "initialized",
+                    modelsDiscovered: discovered.length,
+                    models: discovered.map((m) => ({ id: m.id, tier: m.tier })),
+                  },
+                  null,
+                  2,
+                ),
+              );
+            } else {
+              const merged = mergeModelsIncremental(existing.models, discovered);
+              await storeRoutingContext(col, { ...existing, models: merged, models_hash: newHash });
+              routingCache.invalidate(agentId);
+              const added = discovered.filter((d) => !existing.models.some((e) => e.id === d.id));
+              const removed = existing.models.filter((e) => !discovered.some((d) => d.id === e.id));
+              console.log(
+                JSON.stringify(
+                  {
+                    action: "rediscovered",
+                    added: added.map((m) => ({ id: m.id, tier: m.tier })),
+                    removed: removed.map((m) => m.id),
+                    totalActive: merged.filter((m) => m.active !== false).length,
+                  },
+                  null,
+                  2,
+                ),
+              );
+            }
+          });
+
+        routingCmd
+          .command("test")
+          .description("Test classification of a prompt (dry-run, no override emitted)")
+          .requiredOption("--prompt <text>", "Prompt text to classify")
+          .option("--tools", "Simulate tools-in-context", false)
+          .option("--agent-id <id>", "Agent ID")
+          .action(async (opts: { prompt: string; tools: boolean; agentId?: string }) => {
+            const col = await db.getCollection("routing");
+            const doc = await getRoutingContext(col, opts.agentId ?? cfg.agentId);
+            if (!doc) {
+              console.error("Routing not initialized.");
+              return;
+            }
+            const decision = resolveRoutingOverride(
+              opts.prompt,
+              doc,
+              opts.tools,
+              undefined,
+              opts.agentId ?? cfg.agentId,
+            );
+            console.log(JSON.stringify(decision, null, 2));
+          });
+
+        routingCmd
+          .command("reset")
+          .description("Delete routing context and re-seed from defaults")
+          .option("--agent-id <id>", "Agent ID")
+          .action(async (opts: { agentId?: string }) => {
+            const agentId = opts.agentId ?? cfg.agentId;
+            const col = await db.getCollection("routing");
+            const result = await col.deleteOne({ agent_id: agentId });
+            routingCache.invalidate(agentId);
+            console.log(
+              JSON.stringify(
+                {
+                  action: "deleted",
+                  agentId,
+                  deleted: result.deletedCount > 0,
+                  note: "Restart gateway to re-seed with defaults",
+                },
+                null,
+                2,
+              ),
+            );
+          });
       },
       { commands: ["mongobrain"] },
     );
@@ -938,9 +1186,11 @@ const memoryMongoDBPlugin = {
     // ========================================================================
 
     // Inject agent_config (soul, instructions, persona, etc.) from MongoDB
+    // When dbFirst is enabled, bootstrap hook already injects config into workspace files
     api.on(
       "before_agent_start",
       async () => {
+        if (cfg.dbFirst) return;
         try {
           const col = await db.getCollection("agent_config");
           const docs = await agentConfig.getConfig(col, cfg.agentId);
@@ -1065,6 +1315,107 @@ const memoryMongoDBPlugin = {
         api.logger.warn(`memory-mongodb: workspace bootstrap failed: ${String(err)}`);
       }
     });
+
+    // ========================================================================
+    // DB-First Bootstrap (agent:bootstrap hook + skill injection)
+    // ========================================================================
+
+    registerBootstrapHook(api, db, cfg);
+
+    // ========================================================================
+    // Dynamic Model Routing
+    // ========================================================================
+
+    const routingCache = new RoutingCache(cfg.routing.cacheTtlMs);
+
+    if (cfg.routing.enabled) {
+      // Seed routing context at gateway startup
+      api.on("gateway_start", async () => {
+        try {
+          const col = await db.getCollection("routing");
+          const existing = await getRoutingContext(col, cfg.agentId);
+
+          // Load seed defaults
+          const seedUrl = new URL("../docs/db-snapshot/routing--default.json", import.meta.url);
+          const seedRaw = await fs.readFile(seedUrl, "utf-8");
+          const seed = JSON.parse(seedRaw);
+
+          const heuristics = seed.model_discovery?.tier_heuristics ?? {};
+          const discovered = discoverModels(api.config, cfg.agentId, heuristics);
+          const newHash = computeModelsHash(discovered);
+
+          if (!existing) {
+            // First boot: seed + discover models
+            await storeRoutingContext(col, {
+              agent_id: cfg.agentId,
+              version: seed.version ?? 5,
+              models: discovered,
+              models_hash: newHash,
+              model_discovery: seed.model_discovery,
+              classification: seed.classification,
+              routing: seed.routing,
+              escalation: seed.escalation,
+            });
+            api.logger.info(
+              `memory-mongodb: routing_context initialized (${discovered.length} models discovered)`,
+            );
+          } else if (existing.models_hash !== newHash) {
+            // Config changed: incremental re-discovery
+            const merged = mergeModelsIncremental(existing.models, discovered);
+            await storeRoutingContext(col, {
+              ...existing,
+              models: merged,
+              models_hash: newHash,
+            });
+            routingCache.invalidate(cfg.agentId);
+            const added = merged.length - existing.models.length;
+            api.logger.info(
+              `memory-mongodb: routing re-discovery (${added >= 0 ? "added" : "removed"} ${Math.abs(added)} models)`,
+            );
+          }
+        } catch (err) {
+          api.logger.warn(`memory-mongodb: routing seed failed: ${String(err)}`);
+        }
+      });
+
+      // Per-message routing override
+      api.on(
+        "before_agent_start",
+        async (event, ctx) => {
+          if (!event.prompt || event.prompt.length < 3) return;
+
+          try {
+            const col = await db.getCollection("routing");
+            const routingDoc = await routingCache.get(col, cfg.agentId);
+            if (!routingDoc || routingDoc.models.length === 0) return;
+
+            // Detect if tools are active in this agent context
+            const toolsInContext = !!(ctx as Record<string, unknown>).messageProvider;
+
+            const decision = resolveRoutingOverride(
+              event.prompt,
+              routingDoc,
+              toolsInContext,
+              api.logger,
+              cfg.agentId,
+            );
+
+            if (decision.override) {
+              return {
+                modelOverride: {
+                  provider: decision.provider,
+                  model: decision.model,
+                  reason: decision.reason,
+                },
+              };
+            }
+          } catch (err) {
+            api.logger.warn(`memory-mongodb: routing failed: ${String(err)}`);
+          }
+        },
+        { priority: 5 },
+      );
+    }
 
     // ========================================================================
     // Service

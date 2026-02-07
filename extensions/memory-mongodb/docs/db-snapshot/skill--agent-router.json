@@ -1,0 +1,77 @@
+{
+  "name": "agent-router",
+  "description": "Classifies incoming prompts by complexity and intent, dispatches to the optimal model using routing_context as source of truth",
+  "version": 2,
+  "prompt_base": "You are the routing layer of the openclaw agent system. Your job is to classify prompts and select the most efficient model for each message. Always consult routing_context for available models, capabilities, and routing rules. Prefer the fastest and cheapest model that satisfies the capability requirements. When uncertain, do not override — let the default model handle it.",
+  "triggers": [
+    "gestione agenti",
+    "agent router",
+    "orchestrazione",
+    "smista prompt",
+    "route agent",
+    "quale modello",
+    "which model",
+    "routing"
+  ],
+  "depends_on": [],
+  "guidelines": [
+    {
+      "title": "Prompt Classification",
+      "content": "1. Read the incoming prompt\n2. Match against indicator keywords from routing_context.classification.indicators\n3. Check for path patterns (file references) and code blocks\n4. Assign a category: CHAT, QUICK, TOOL, CODE, or PLAN\n5. Assign a complexity score 1-10 based on the category's complexity_range\n6. If multiple categories match, choose the highest complexity one",
+      "task": "classification",
+      "priority": 10,
+      "domain": "routing",
+      "tags": ["classification", "prompt-analysis", "complexity"]
+    },
+    {
+      "title": "Model Selection",
+      "content": "1. Load routing_context from DB (or in-memory fallback)\n2. Determine if tools are active in the current agent context\n3. Apply routing rules in priority order from routing_context.routing.rules\n4. Respect capability constraint: never route to a model that lacks capabilities required by context\n5. If classification is ambiguous (multiple categories, low confidence): emit no override\n6. If a rule matches: return modelOverride with provider, model, and reason\n7. Log the routing decision for metrics",
+      "task": "model-selection",
+      "priority": 9,
+      "domain": "routing",
+      "tags": ["routing", "model-selection", "capability-check"]
+    },
+    {
+      "title": "Escalation Handling",
+      "content": "1. Monitor escalation triggers from routing_context.escalation\n2. If user explicitly requests a specific model: honor it (no override)\n3. If previous response was insufficient: escalate to heavy tier\n4. If conversation complexity increases over multiple turns: consider escalation\n5. De-escalation: if conversation shifts to casual after complex work, allow fast tier again",
+      "task": "escalation",
+      "priority": 8,
+      "domain": "routing",
+      "tags": ["escalation", "de-escalation", "context-shift"]
+    },
+    {
+      "title": "Context Handoff",
+      "content": "1. When routing changes the model mid-conversation, pass essential context only\n2. Max 2-3 exchanges of recent history (not full transcript)\n3. Include reason for escalation/de-escalation in handoff\n4. Strip tool results and large outputs from handoff context\n5. Preserve user intent and any pending instructions",
+      "task": "context-handoff",
+      "priority": 7,
+      "domain": "routing",
+      "tags": ["context", "handoff", "history"]
+    }
+  ],
+  "seeds": [],
+  "tools": [],
+  "examples": [
+    {
+      "input": "ciao, come stai?",
+      "output": "Classification: CHAT (1/10). No tools in context. Route: gemini (fast tier). Reason: simple greeting, no capability requirements.",
+      "description": "Simple greeting → fast model"
+    },
+    {
+      "input": "refactora il modulo di autenticazione, dividi in file separati",
+      "output": "Classification: CODE (8/10). Tools in context: yes. Route: claude (heavy tier). Reason: multi-file refactoring requires filesystem access and code generation.",
+      "description": "Code refactoring → heavy model"
+    },
+    {
+      "input": "traduci in inglese: il gatto dorme sul divano",
+      "output": "Classification: QUICK (2/10). No tools in context. Route: gemini (fast tier). Reason: simple translation, no tool requirements.",
+      "description": "Translation → fast model"
+    },
+    {
+      "input": "aiutami con un problema",
+      "output": "Classification: ambiguous. Action: no_override. Reason: insufficient signal to determine complexity. Let default model handle and re-evaluate on follow-up.",
+      "description": "Ambiguous prompt → no override (safe default)"
+    }
+  ],
+  "references": [],
+  "active": true
+}

@@ -1,7 +1,13 @@
 import { type Collection, type Db, type Document, MongoClient } from "mongodb";
 import type { MongoDBConfig, TlsConfig } from "./config.js";
 
-export type CollectionName = "memories" | "guidelines" | "seeds" | "agent_config" | "skills";
+export type CollectionName =
+  | "memories"
+  | "guidelines"
+  | "seeds"
+  | "agent_config"
+  | "skills"
+  | "routing";
 
 export const ALL_COLLECTIONS: CollectionName[] = [
   "memories",
@@ -9,6 +15,7 @@ export const ALL_COLLECTIONS: CollectionName[] = [
   "seeds",
   "agent_config",
   "skills",
+  "routing",
 ];
 
 function buildClientOptions(tls?: TlsConfig): Record<string, unknown> {
@@ -106,6 +113,10 @@ export class MongoMemoryDB {
     );
     await skills.createIndex({ name: 1 }, { name: "name_unique", unique: true });
     await skills.createIndex({ triggers: 1 }, { name: "triggers" });
+
+    // routing: unique agent_id
+    const routing = db.collection("routing");
+    await routing.createIndex({ agent_id: 1 }, { name: "agent_id_unique", unique: true });
   }
 
   async getCollection<T extends Document = Document>(name: CollectionName): Promise<Collection<T>> {
