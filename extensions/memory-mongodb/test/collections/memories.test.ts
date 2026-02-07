@@ -99,6 +99,65 @@ describe("memories", () => {
       await search(col, { query: "test", limit: 5 });
       expect(cursor.limit).toHaveBeenCalledWith(5);
     });
+
+    it("falls back to regex when text search returns empty", async () => {
+      const regexDocs = [{ content: "utente preferisce dark mode" }];
+      let callCount = 0;
+      const col = mockCollection({
+        find: vi.fn(() => {
+          callCount++;
+          return callCount === 1 ? mockCursor([]) : mockCursor(regexDocs);
+        }),
+      });
+
+      const results = await search(col, { query: "utente dark" });
+      expect(results).toEqual(regexDocs);
+      expect(col.find).toHaveBeenCalledTimes(2);
+      const regexCall = (col.find as ReturnType<typeof vi.fn>).mock.calls[1][0];
+      expect(regexCall.content).toBeDefined();
+      expect(regexCall.content.$regex).toContain("utente");
+      expect(regexCall.content.$regex).toContain("dark");
+    });
+
+    it("skips regex fallback when all keywords are too short", async () => {
+      const col = mockCollection({ find: vi.fn(() => mockCursor([])) });
+      const results = await search(col, { query: "a b" });
+      expect(results).toEqual([]);
+      expect(col.find).toHaveBeenCalledTimes(1);
+    });
+
+    it("regex fallback filters keywords shorter than 3 chars", async () => {
+      let callCount = 0;
+      const col = mockCollection({
+        find: vi.fn(() => {
+          callCount++;
+          return mockCursor([]);
+        }),
+      });
+
+      await search(col, { query: "il mio database preferito" });
+      expect(col.find).toHaveBeenCalledTimes(2);
+      const regexCall = (col.find as ReturnType<typeof vi.fn>).mock.calls[1][0];
+      expect(regexCall.content.$regex).toContain("mio");
+      expect(regexCall.content.$regex).toContain("database");
+      expect(regexCall.content.$regex).toContain("preferito");
+      expect(regexCall.content.$regex).not.toContain("(?=.*il)");
+    });
+
+    it("regex fallback includes domain filter", async () => {
+      let callCount = 0;
+      const col = mockCollection({
+        find: vi.fn(() => {
+          callCount++;
+          return mockCursor([]);
+        }),
+      });
+
+      await search(col, { query: "test query", domain: "prefs" });
+      expect(col.find).toHaveBeenCalledTimes(2);
+      const regexCall = (col.find as ReturnType<typeof vi.fn>).mock.calls[1][0];
+      expect(regexCall.domain).toBe("prefs");
+    });
   });
 
   describe("prune", () => {

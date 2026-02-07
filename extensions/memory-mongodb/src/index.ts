@@ -41,6 +41,16 @@ const MEMORY_TRIGGERS = [
   /my\s+\w+\s+is|is\s+my/i,
   /i (like|prefer|hate|love|want|need)/i,
   /always|never|important|sempre|mai/i,
+  // Italian conversational triggers
+  /mi piace|non mi piace|odio|amo|vorrei|ho bisogno/i,
+  /il mio\s+\w+\s+[eè]|si chiama|mi chiamo/i,
+  /uso sempre|non uso mai|di solito/i,
+  /ho scelto|abbiamo deciso|usiamo|useremo/i,
+  /nota bene|importante|attenzione|ricordati/i,
+  // Generic declarative facts (any language)
+  /(?:^|\.\s*)(?:the|il|la|lo|le|i|gli)\s+\w+\s+(?:is|are|was|were|[eè]|sono|era|erano)\b/i,
+  /(?:we|noi)\s+(?:use|using|utilizziam|usiam)/i,
+  /(?:project|progetto|app|api|server|database|db)\s+\w+\s+(?:is|runs|uses|[eè]|usa|gira)/i,
 ];
 
 function shouldCapture(text: string): boolean {
@@ -55,10 +65,13 @@ function shouldCapture(text: string): boolean {
 
 function detectCategory(text: string): string {
   const lower = text.toLowerCase();
-  if (/prefer|like|love|hate|want/i.test(lower)) return "preference";
-  if (/decided|will use|budeme/i.test(lower)) return "decision";
-  if (/\+\d{10,}|@[\w.-]+\.\w+|is called/i.test(lower)) return "entity";
-  if (/\bis\b|\bare\b|\bhas\b|\bhave\b/i.test(lower)) return "fact";
+  if (/prefer|like|love|hate|want|mi piace|non mi piace|odio|amo|vorrei|preferisco/i.test(lower))
+    return "preference";
+  if (/decided|will use|budeme|ho scelto|deciso|usiamo|useremo|abbiamo deciso/i.test(lower))
+    return "decision";
+  if (/\+\d{10,}|@[\w.-]+\.\w+|is called|si chiama|mi chiamo/i.test(lower)) return "entity";
+  if (/\bis\b|\bare\b|\bhas\b|\bhave\b|\b[eè]\b|\bsono\b|\bha\b|\bhanno\b/i.test(lower))
+    return "fact";
   return "note";
 }
 
@@ -596,6 +609,10 @@ const memoryMongoDBPlugin = {
     api.registerCli(
       ({ program }) => {
         const cmd = program.command("mongobrain").description("MongoDB memory plugin commands");
+
+        cmd.hook("postAction", async () => {
+          await db.close();
+        });
 
         cmd
           .command("status")

@@ -70,15 +70,43 @@ export async function search(
   col: Collection,
   params: SearchParams,
 ): Promise<Array<MemoryDoc & { score?: number }>> {
-  const query: Record<string, unknown> = { $text: { $search: params.query } };
-  if (params.domain) query.domain = params.domain;
-  if (params.category) query.category = params.category;
+  const limit = params.limit ?? 10;
+  const filter: Record<string, unknown> = {};
+  if (params.domain) filter.domain = params.domain;
+  if (params.category) filter.category = params.category;
 
-  return col
-    .find(query, { projection: { score: { $meta: "textScore" } } })
+  // Primary: MongoDB $text search (uses text indexes)
+  const textResults = (await col
+    .find(
+      { ...filter, $text: { $search: params.query } },
+      { projection: { score: { $meta: "textScore" } } },
+    )
     .sort({ score: { $meta: "textScore" } })
-    .limit(params.limit ?? 10)
-    .toArray() as Promise<Array<MemoryDoc & { score?: number }>>;
+    .limit(limit)
+    .toArray()) as Array<MemoryDoc & { score?: number }>;
+
+  if (textResults.length > 0) return textResults;
+
+  // Fallback: regex search on significant keywords (>= 3 chars)
+  const keywords = params.query
+    .split(/\s+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter((w) => w.length >= 3);
+  if (keywords.length === 0) return [];
+
+  const regexPattern = keywords.map((w) => `(?=.*${escapeRegex(w)})`).join("");
+  const regexQuery: Record<string, unknown> = {
+    ...filter,
+    content: { $regex: regexPattern, $options: "is" },
+  };
+
+  return col.find(regexQuery).sort({ updated_at: -1 }).limit(limit).toArray() as Promise<
+    Array<MemoryDoc & { score?: number }>
+  >;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export async function prune(col: Collection): Promise<number> {
