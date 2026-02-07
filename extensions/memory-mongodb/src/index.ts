@@ -1492,6 +1492,73 @@ const memoryMongoDBPlugin = {
             api.logger.warn(`memory-mongodb: routing seed failed: ${String(err)}`);
           }
         }
+
+        // Auto-seed: populate seeds, skills, agent_config on first boot (empty collections)
+        try {
+          const migrator = createMigrator(db, cfg.agentId);
+          const seedsCol = await db.getCollection("seeds");
+          const skillsCol = await db.getCollection("skills");
+          const configCol = await db.getCollection("agent_config");
+
+          const seedsCount = await seedsCol.countDocuments();
+          const skillsCount = await skillsCol.countDocuments();
+          const configCount = await configCol.countDocuments();
+
+          if (seedsCount === 0 || skillsCount === 0) {
+            const result = await migrator.seedStarters();
+            const totalInserted = result.seeds.inserted + result.skills.inserted;
+            if (totalInserted > 0) {
+              api.logger.info(
+                `memory-mongodb: auto-seeded starters (seeds: ${result.seeds.inserted}, skills: ${result.skills.inserted})`,
+              );
+            }
+          }
+
+          // Seed claude-code-ops skill from db-snapshot if missing
+          if (!(await skillsCol.findOne({ name: "claude-code-ops" }))) {
+            try {
+              const opsUrl = new URL(
+                "../docs/db-snapshot/skill--claude-code-ops.json",
+                import.meta.url,
+              );
+              const opsRaw = await fs.readFile(opsUrl, "utf-8");
+              const opsSkill = JSON.parse(opsRaw);
+              const now = new Date();
+              await skillsCol.insertOne({ ...opsSkill, created_at: now, updated_at: now });
+              api.logger.info("memory-mongodb: auto-seeded skill 'claude-code-ops'");
+            } catch (err) {
+              api.logger.warn(`memory-mongodb: claude-code-ops seed failed: ${String(err)}`);
+            }
+          }
+
+          // Auto-seed agent_config from embedded defaults (DB-first, no disk dependency)
+          if (configCount === 0) {
+            const now = new Date();
+            let seeded = 0;
+            for (const def of AGENT_CONFIG_DEFAULTS) {
+              const filter = { type: def.type, agent_id: cfg.agentId };
+              const existing = await configCol.findOne(filter);
+              if (!existing) {
+                await configCol.insertOne({
+                  type: def.type,
+                  agent_id: cfg.agentId,
+                  content: def.content,
+                  version: 1,
+                  created_at: now,
+                  updated_at: now,
+                });
+                seeded++;
+              }
+            }
+            if (seeded > 0) {
+              api.logger.info(
+                `memory-mongodb: auto-seeded ${seeded} agent_config entries from embedded defaults`,
+              );
+            }
+          }
+        } catch (err) {
+          api.logger.warn(`memory-mongodb: auto-seed failed: ${String(err)}`);
+        }
       },
       stop: async () => {
         await db.close();
@@ -1677,5 +1744,103 @@ const MONGOBRAIN_BOOT = `${MONGOBRAIN_MARKER}
 openclaw mongobrain status
 \`\`\`
 <!-- /mongobrain:native -->`;
+
+// ============================================================================
+// Embedded agent_config defaults (DB-first: no disk dependency)
+// ============================================================================
+
+const AGENT_CONFIG_DEFAULTS: Array<{ type: string; content: string }> = [
+  {
+    type: "soul",
+    content: [
+      "You are an intelligent AI assistant powered by OpenClaw with persistent MongoDB memory (mongoBrain).",
+      "",
+      "## Core Behavior",
+      "- Be helpful, precise, and concise",
+      "- Use mongoBrain to store and recall knowledge across conversations",
+      "- Before answering, check if relevant memories exist: use mongobrain_search or `openclaw mongobrain search`",
+      "- After learning something important (preferences, decisions, facts), store it: use mongobrain_store or `openclaw mongobrain store`",
+      "- Adapt your language to the user (respond in the same language they use)",
+      "",
+      "## Memory Usage",
+      "- Preferences, decisions, and facts should be stored in the `memories` collection",
+      "- Behavioral rules and SOPs go in `guidelines`",
+      "- Reusable knowledge templates go in `seeds`",
+      "- Search before storing to avoid duplicates",
+      "",
+      "## Communication Style",
+      "- Be direct: answer first, explain after if needed",
+      "- Use structured formatting (lists, headers) for complex responses",
+      "- Ask clarifying questions when the request is ambiguous",
+      "- Acknowledge when you don't know something",
+    ].join("\n"),
+  },
+  {
+    type: "boot",
+    content: [
+      "## mongoBrain — Identity Recovery",
+      "",
+      "All'avvio, carica la configurazione completa dal database usando `mongobrain_config_load`.",
+      "",
+      "Applica ogni sezione (soul, identity, user, tools, agents, heartbeat) come contesto operativo.",
+      "",
+      "Poi carica l'indice delle skill attive:",
+      "- Usa `mongobrain_search` con collection `skills` per trovare skill attive",
+      "- Usa `mongobrain_skill_match` per attivare skill specifiche in base al contesto",
+      "",
+      "Se una sezione non e' presente nel database, ignorala e prosegui.",
+      "",
+      "### Creare nuove skill",
+      "",
+      "Per creare una nuova skill, usa `mongobrain_skill_match` con trigger `create skill`.",
+      "Poi carica la skill-builder con `mongobrain_get` collection `skills` name `skill-builder`.",
+      "Segui le guidelines della skill-builder per compilare ogni sezione del documento.",
+    ].join("\n"),
+  },
+  {
+    type: "tools",
+    content: [
+      "## mongoBrain (MongoDB Memory Plugin)",
+      "",
+      "Persistent knowledge base. Use `openclaw mongobrain` CLI or native tools.",
+      "",
+      "### Native Tools (API agents)",
+      "| Tool | Usage |",
+      "|------|-------|",
+      "| `mongobrain_search` | Search across collections with text ranking |",
+      "| `mongobrain_store` | Store a document in any collection |",
+      "| `mongobrain_get` | Get a specific document by name/type |",
+      "| `mongobrain_forget` | Delete or deactivate a document |",
+      "| `mongobrain_skill_match` | Find skills matching a trigger |",
+      "| `mongobrain_config_load` | Load all agent config sections |",
+      "",
+      "### CLI Commands (exec/bash)",
+      "| Command | Usage |",
+      "|---------|-------|",
+      '| **search** | `openclaw mongobrain search "query" [--collection name] [--limit n]` |',
+      '| **store** | `openclaw mongobrain store <collection> --content "text" [--name n] [--tags a,b]` |',
+      "| **get-config** | `openclaw mongobrain get-config [--type soul]` |",
+      '| **match-skill** | `openclaw mongobrain match-skill --trigger "keyword"` |',
+      "| **status** | `openclaw mongobrain status` |",
+      "| **export** | `openclaw mongobrain export <collection>` |",
+      "",
+      "### Collections",
+      "- **memories**: Facts, preferences, decisions, entities",
+      "- **guidelines**: Behavioral rules with priority and domain",
+      "- **seeds**: Reusable knowledge templates",
+      "- **config**: Agent configuration (soul, identity, tools, boot, etc.)",
+      "- **skills**: Skill definitions with triggers and guidelines",
+      "- **routing**: Model routing context (tiers, rules, classification)",
+    ].join("\n"),
+  },
+  {
+    type: "identity",
+    content: [
+      "name: OpenClaw Agent",
+      "description: AI assistant with persistent MongoDB memory",
+      "version: 1",
+    ].join("\n"),
+  },
+];
 
 export default memoryMongoDBPlugin;
