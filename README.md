@@ -128,6 +128,155 @@ Run `openclaw doctor` to surface risky/misconfigured DM policies.
 - **[Companion apps](https://docs.openclaw.ai/platforms/macos)** — macOS menu bar app + iOS/Android [nodes](https://docs.openclaw.ai/nodes).
 - **[Onboarding](https://docs.openclaw.ai/start/wizard) + [skills](https://docs.openclaw.ai/tools/skills)** — wizard-driven setup with bundled/managed/workspace skills.
 
+## Fork: opencliclaw
+
+This fork adds **Claude Code as a native brain** and **MongoDB as a persistent knowledge base** (mongoBrain).
+
+### Claude Code as native brain
+
+Upstream OpenClaw injects `"Tools are disabled"` into CLI agent system prompts, blocking Claude Code from using its native tools (Read, Write, Bash, etc.).
+
+This fork adds `extraSystemPromptOverride` to `CliBackendConfig`:
+
+- `claude-cli` defaults to `""` (no restriction) — Claude Code uses all its native tools
+- Other CLI backends keep the default "Tools are disabled" message
+- Zero regressions on non-Claude backends
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": { "primary": "claude-cli/opus" }
+    }
+  }
+}
+```
+
+Requires: `claude` CLI installed and authenticated (`claude login`). No API key needed.
+
+### Plugin hooks for CLI agents
+
+Upstream `before_agent_start` hooks (memory recall, config injection) only fire for API agents. CLI agents receive no plugin context.
+
+This fork invokes `before_agent_start` hooks in `cli-runner.ts`, so CLI agents get the same context injection as API agents: memories, agent config, persona, etc.
+
+### memory-mongodb plugin
+
+New native TypeScript plugin (`extensions/memory-mongodb`) replacing the old Python-based mongoBrain skill. Manages 5 MongoDB collections as a persistent knowledge base.
+
+| Collection       | Purpose                                                     |
+| ---------------- | ----------------------------------------------------------- |
+| **memories**     | Facts, preferences, decisions, entities (auto-capture, TTL) |
+| **guidelines**   | Behavioral rules with priority and domain scoping           |
+| **seeds**        | Reusable knowledge templates                                |
+| **agent_config** | Per-agent config: soul, identity, persona, instructions     |
+| **skills**       | Skill definitions with trigger-based matching               |
+
+Key features:
+
+- **Auto-recall** — injects relevant memories into agent context based on conversation
+- **Auto-capture** — detects memorable statements and stores them
+- **Agent config injection** — loads soul/identity/persona from MongoDB at every run (API + CLI agents)
+- **Workspace bootstrap** — auto-generates TOOLS.md/BOOT.md sections when CLI models are configured
+- **6 agent tools** — `mongobrain_search`, `mongobrain_store`, `mongobrain_get`, `mongobrain_forget`, `mongobrain_skill_match`, `mongobrain_config_load`
+- **CLI commands** — `openclaw mongobrain status|search|store|get-config|export|migrate`
+- **Migration** — from workspace files (SOUL.md, MEMORY.md, daily logs) to MongoDB
+
+Config:
+
+```json
+{
+  "plugins": {
+    "slots": { "memory": "memory-mongodb" },
+    "entries": {
+      "memory-mongodb": {
+        "enabled": true,
+        "config": {
+          "uri": "${MONGODB_URI}",
+          "database": "openclaw_memory",
+          "agentId": "main",
+          "autoRecall": true,
+          "autoCapture": true
+        }
+      }
+    }
+  }
+}
+```
+
+Details: [`extensions/memory-mongodb/README.md`](extensions/memory-mongodb/README.md)
+
+### Routing flow
+
+Complete path from inbound message to agent response:
+
+```
+Channel (WhatsApp, Telegram, Discord, ...)
+  │
+  ▼
+Normalize ─── src/channels/plugins/normalize/{channel}.ts
+  │            Raw message → MsgContext (sender, text, media)
+  ▼
+Routing ───── src/routing/resolve-route.ts:resolveAgentRoute()
+  │            Bindings precedence: peer > guild > team > account > channel > default
+  │            Output: agentId, sessionKey
+  ▼
+Reply ──────── src/auto-reply/reply/get-reply.ts:getReplyFromConfig()
+  │            Resolve model, workspace, session state, directives
+  ▼
+Dispatch ──── src/auto-reply/reply/agent-runner-execution.ts
+  │            isCliProvider(provider) ? CLI path : API path
+  │
+  ├──── CLI path (claude-cli, codex-cli)
+  │     │
+  │     │  src/agents/cli-runner.ts:runCliAgent()
+  │     │
+  │     ├─ resolveCliBackendConfig() → backend (command, args, session mgmt)
+  │     ├─ resolveBootstrapContextForRun() → AGENTS.md, SOUL.md, TOOLS.md
+  │     ├─ buildSystemPrompt() → workspace files + extra system prompt
+  │     ├─ before_agent_start hooks ← memory-mongodb injects:
+  │     │    1. agent_config (soul, identity, persona) from MongoDB
+  │     │    2. auto-recall (relevant memories from prompt)
+  │     ├─ buildCliArgs() → [--model, --session-id, --system-prompt, ...]
+  │     └─ runCommandWithTimeout(["claude", ...args]) → stdout → parse JSON
+  │
+  └──── API path (anthropic, openai, google, openrouter, ...)
+        │
+        │  src/agents/pi-embedded-runner/run.ts:runEmbeddedPiAgent()
+        │
+        ├─ Auth profile selection + failover loop
+        ├─ before_agent_start hooks ← same memory-mongodb injection
+        ├─ runEmbeddedAttempt() → system prompt assembly + tool definitions
+        ├─ SessionManager.run() → SDK → HTTP API (Anthropic/OpenAI/Google)
+        └─ Stream responses, handle tool calls, accumulate payloads
+  │
+  ▼
+Response ─── src/auto-reply/reply/agent-runner.ts:runReplyAgent()
+  │           Build ReplyPayload (text, media, reply-to threading)
+  │           Add usage footer, compaction notice
+  ▼
+Outbound ─── src/channels/plugins/outbound/{channel}.ts
+              Convert ReplyPayload → channel API call
+              Handle chunking, media, reply threading
+```
+
+**Key decision points:**
+
+- **Agent selection**: `resolveAgentRoute()` uses bindings config. Most-specific binding wins (exact peer > guild > team > channel > default agent).
+- **CLI vs API**: `isCliProvider()` in `src/agents/model-selection.ts:50-60` checks if the provider is `claude-cli`, `codex-cli`, or a custom `cliBackends` entry.
+- **Model fallback**: `runWithModelFallback()` wraps both paths. On auth/rate-limit failure, advances to next model in `fallbacks` array.
+- **Hook injection**: `before_agent_start` fires for **both** CLI and API paths (this fork's addition). The memory-mongodb plugin registers two hooks: agent_config (priority 10) and auto-recall (default priority).
+
+### Modified files (vs upstream)
+
+| File                                      | Change                                                                  |
+| ----------------------------------------- | ----------------------------------------------------------------------- |
+| `src/agents/cli-runner.ts`                | `extraSystemPromptOverride` + `before_agent_start` hooks for CLI agents |
+| `src/agents/cli-backends.ts`              | `extraSystemPromptOverride: ""` in default claude backend               |
+| `src/config/types.agent-defaults.ts`      | `extraSystemPromptOverride?: string` in `CliBackendConfig`              |
+| `src/config/zod-schema.agent-defaults.ts` | Schema validation for new field                                         |
+| `extensions/memory-mongodb/`              | Entire new plugin                                                       |
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=openclaw/openclaw&type=date&legend=top-left)](https://www.star-history.com/#openclaw/openclaw&type=date&legend=top-left)

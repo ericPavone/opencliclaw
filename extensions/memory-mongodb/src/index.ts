@@ -1,5 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { Type } from "@sinclair/typebox";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { stringEnum } from "openclaw/plugin-sdk";
 import * as agentConfig from "./collections/agent-config.js";
 import * as guidelines from "./collections/guidelines.js";
@@ -935,6 +937,31 @@ const memoryMongoDBPlugin = {
     // Lifecycle Hooks
     // ========================================================================
 
+    // Inject agent_config (soul, instructions, persona, etc.) from MongoDB
+    api.on(
+      "before_agent_start",
+      async () => {
+        try {
+          const col = await db.getCollection("agent_config");
+          const docs = await agentConfig.getConfig(col, cfg.agentId);
+          if (docs.length === 0) return;
+
+          const configContext = docs.map((d) => `### ${d.type}\n${d.content}`).join("\n\n");
+
+          api.logger.info?.(
+            `memory-mongodb: injecting agent_config (${docs.length} sections) into context`,
+          );
+
+          return {
+            prependContext: `<agent-config>\n${configContext}\n</agent-config>`,
+          };
+        } catch (err) {
+          api.logger.warn(`memory-mongodb: agent_config injection failed: ${String(err)}`);
+        }
+      },
+      { priority: 10 },
+    );
+
     if (cfg.autoRecall) {
       api.on("before_agent_start", async (event) => {
         if (!event.prompt || event.prompt.length < 5) return;
@@ -1023,6 +1050,23 @@ const memoryMongoDBPlugin = {
     }
 
     // ========================================================================
+    // CLI Workspace Bootstrap (TOOLS.md + BOOT.md)
+    // ========================================================================
+
+    api.on("gateway_start", async () => {
+      try {
+        if (!hasAnyCliModel(api.config)) return;
+
+        const workspaceDirs = resolveWorkspaceDirs(api.config);
+        for (const wsDir of workspaceDirs) {
+          await ensureMongobrainWorkspaceFiles(wsDir, api.logger);
+        }
+      } catch (err) {
+        api.logger.warn(`memory-mongodb: workspace bootstrap failed: ${String(err)}`);
+      }
+    });
+
+    // ========================================================================
     // Service
     // ========================================================================
 
@@ -1079,5 +1123,143 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   }
   return value;
 }
+
+// ============================================================================
+// CLI Workspace Helpers
+// ============================================================================
+
+const MONGOBRAIN_MARKER = "<!-- mongobrain:native -->";
+
+function extractProvider(modelRef: string): string | null {
+  const slash = modelRef.indexOf("/");
+  return slash > 0 ? modelRef.slice(0, slash).trim().toLowerCase() : null;
+}
+
+function hasAnyCliModel(config: Record<string, unknown>): boolean {
+  const agents = config.agents as Record<string, unknown> | undefined;
+  const defaults = agents?.defaults as Record<string, unknown> | undefined;
+  const cliBackends = (defaults?.cliBackends ?? {}) as Record<string, unknown>;
+  const cliIds = new Set([
+    "claude-cli",
+    "codex-cli",
+    ...Object.keys(cliBackends).map((k) => k.toLowerCase()),
+  ]);
+
+  const checkModel = (model: unknown): boolean => {
+    const raw =
+      typeof model === "string" ? model : (model as Record<string, unknown> | undefined)?.primary;
+    if (typeof raw !== "string") return false;
+    const provider = extractProvider(raw);
+    return provider != null && cliIds.has(provider);
+  };
+
+  if (checkModel(defaults?.model)) return true;
+
+  const fallbacks = (defaults?.model as Record<string, unknown> | undefined)?.fallbacks;
+  if (Array.isArray(fallbacks) && fallbacks.some(checkModel)) return true;
+
+  const list = (agents?.list ?? []) as Array<Record<string, unknown>>;
+  return list.some((a) => checkModel(a.model));
+}
+
+function resolveWorkspaceDirs(config: Record<string, unknown>): string[] {
+  const agents = config.agents as Record<string, unknown> | undefined;
+  const defaults = agents?.defaults as Record<string, unknown> | undefined;
+  const defaultWs = (defaults?.workspace as string) ?? "~/.openclaw/workspace";
+  const dirs = new Set<string>([resolveTilde(defaultWs)]);
+
+  const list = (agents?.list ?? []) as Array<Record<string, unknown>>;
+  for (const agent of list) {
+    if (typeof agent.workspace === "string" && agent.workspace.trim()) {
+      dirs.add(resolveTilde(agent.workspace));
+    }
+  }
+
+  return Array.from(dirs);
+}
+
+function resolveTilde(p: string): string {
+  if (p.startsWith("~/")) {
+    return path.join(process.env.HOME ?? "/root", p.slice(2));
+  }
+  return p;
+}
+
+async function ensureMongobrainWorkspaceFiles(
+  wsDir: string,
+  logger: { info: (msg: string) => void; warn: (msg: string) => void },
+): Promise<void> {
+  try {
+    await fs.access(wsDir);
+  } catch {
+    return;
+  }
+
+  await ensureSection(path.join(wsDir, "TOOLS.md"), MONGOBRAIN_TOOLS, logger);
+  await ensureSection(path.join(wsDir, "BOOT.md"), MONGOBRAIN_BOOT, logger);
+}
+
+async function ensureSection(
+  filePath: string,
+  section: string,
+  logger: { info: (msg: string) => void },
+): Promise<void> {
+  let existing = "";
+  try {
+    existing = await fs.readFile(filePath, "utf-8");
+  } catch {
+    // file doesn't exist yet
+  }
+
+  if (existing.includes(MONGOBRAIN_MARKER)) return;
+
+  const updated = existing.length > 0 ? `${existing.trimEnd()}\n\n${section}\n` : `${section}\n`;
+  await fs.writeFile(filePath, updated, "utf-8");
+  logger.info(`memory-mongodb: wrote mongoBrain section to ${path.basename(filePath)}`);
+}
+
+const MONGOBRAIN_TOOLS = `${MONGOBRAIN_MARKER}
+## MongoBrain (MongoDB Memory Plugin)
+
+Persistent MongoDB knowledge base accessible via CLI.
+Use \`openclaw mongobrain\` commands through exec/bash.
+
+### Commands
+
+| Command | Usage |
+|---------|-------|
+| **search** | \`openclaw mongobrain search "query" [--collection name] [--domain dom] [--limit n]\` |
+| **store** | \`openclaw mongobrain store <collection> --content "text" [--name n] [--domain d] [--tags a,b]\` |
+| **get-config** | \`openclaw mongobrain get-config [--type soul\\|identity\\|...]\` |
+| **get-skill** | \`openclaw mongobrain get-skill --name "name"\` |
+| **match-skill** | \`openclaw mongobrain match-skill --trigger "keyword"\` |
+| **status** | \`openclaw mongobrain status\` |
+| **export** | \`openclaw mongobrain export <collection> [--domain d]\` |
+
+### Collections
+
+- **memories**: Facts, preferences, decisions, entities
+- **guidelines**: Behavioral rules with priority
+- **seeds**: Reusable knowledge templates
+- **config**: Agent configuration (soul, identity, instructions, context, tools, safety, persona, rules)
+- **skills**: Skill definitions with triggers
+
+### Examples
+
+\`\`\`bash
+openclaw mongobrain search "user preferences"
+openclaw mongobrain store memories --content "User prefers dark mode" --category preference
+openclaw mongobrain get-config --type soul
+openclaw mongobrain match-skill --trigger "translate"
+\`\`\`
+<!-- /mongobrain:native -->`;
+
+const MONGOBRAIN_BOOT = `${MONGOBRAIN_MARKER}
+## MongoBrain Startup Check
+
+\`\`\`bash
+openclaw mongobrain status
+\`\`\`
+<!-- /mongobrain:native -->`;
 
 export default memoryMongoDBPlugin;

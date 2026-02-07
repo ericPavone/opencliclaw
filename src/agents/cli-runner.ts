@@ -6,6 +6,7 @@ import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
 import { shouldLogVerbose } from "../globals.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { resolveSessionAgentIds } from "./agent-scope.js";
 import { makeBootstrapWarn, resolveBootstrapContextForRun } from "./bootstrap-files.js";
@@ -141,9 +142,33 @@ export async function runCliAgent(params: {
     systemPrompt,
   });
 
+  // Run before_agent_start plugin hooks (e.g. autoRecall from memory-mongodb)
+  let effectivePrompt = params.prompt;
+  const hookRunner = getGlobalHookRunner();
+  if (hookRunner?.hasHooks("before_agent_start")) {
+    try {
+      const hookResult = await hookRunner.runBeforeAgentStart(
+        { prompt: params.prompt, messages: [] },
+        {
+          agentId: sessionAgentId,
+          sessionKey: params.sessionKey,
+          workspaceDir,
+        },
+      );
+      if (hookResult?.prependContext) {
+        effectivePrompt = `${hookResult.prependContext}\n\n${params.prompt}`;
+        log.debug(
+          `hooks: prepended context to CLI prompt (${hookResult.prependContext.length} chars)`,
+        );
+      }
+    } catch (hookErr) {
+      log.warn(`before_agent_start hook failed for CLI agent: ${String(hookErr)}`);
+    }
+  }
+
   let imagePaths: string[] | undefined;
   let cleanupImages: (() => Promise<void>) | undefined;
-  let prompt = params.prompt;
+  let prompt = effectivePrompt;
   if (params.images && params.images.length > 0) {
     const imagePayload = await writeCliImages(params.images);
     imagePaths = imagePayload.paths;
