@@ -426,12 +426,13 @@ export function createMigrator(db: MongoMemoryDB, agentId: string) {
           name: "mongoBrain-usage",
           description: "How to use mongoBrain to persist agent knowledge",
           content:
-            "mongoBrain stores data across 5 collections:\n" +
+            "mongoBrain stores data across 6 collections:\n" +
             "1. memories — facts, preferences, notes learned from conversations\n" +
             "2. guidelines — SOPs, checklists, best practices per domain/task\n" +
             "3. seeds — portable knowledge packages transferable between agents\n" +
             "4. agent_config — agent identity sections (soul, tools, identity, etc.)\n" +
-            "5. skills — self-contained skill bundles with guidelines, seeds, tools, examples\n\n" +
+            "5. skills — self-contained skill bundles with guidelines, seeds, tools, examples\n" +
+            "6. routing — per-agent model routing context (tiers, classification rules, models)\n\n" +
             "Use the mongobrain_* tools or the `openclaw mongobrain` CLI to store, search, export, import, prune, and deactivate entries.",
           domain: "openclaw",
           tags: ["mongoBrain", "memory", "getting-started"],
