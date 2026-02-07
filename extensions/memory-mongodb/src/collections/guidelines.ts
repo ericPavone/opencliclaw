@@ -68,18 +68,44 @@ export async function search(
   col: Collection,
   params: SearchParams,
 ): Promise<Array<GuidelineDoc & { score?: number }>> {
-  const query: Record<string, unknown> = {
-    $text: { $search: params.query },
-    active: true,
-  };
-  if (params.domain) query.domain = params.domain;
-  if (params.task) query.task = params.task;
+  const limit = params.limit ?? 10;
+  const filter: Record<string, unknown> = { active: true };
+  if (params.domain) filter.domain = params.domain;
+  if (params.task) filter.task = params.task;
 
-  return col
-    .find(query, { projection: { score: { $meta: "textScore" } } })
+  const textResults = (await col
+    .find(
+      { ...filter, $text: { $search: params.query } },
+      { projection: { score: { $meta: "textScore" } } },
+    )
     .sort({ score: { $meta: "textScore" } })
-    .limit(params.limit ?? 10)
+    .limit(limit)
+    .toArray()) as Array<GuidelineDoc & { score?: number }>;
+
+  if (textResults.length > 0) return textResults;
+
+  const keywords = params.query
+    .split(/\s+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter((w) => w.length >= 3);
+  if (keywords.length === 0) return [];
+
+  const pattern = keywords.map((w) => `(?=.*${escapeRegex(w)})`).join("");
+  return col
+    .find({
+      ...filter,
+      $or: [
+        { title: { $regex: pattern, $options: "is" } },
+        { content: { $regex: pattern, $options: "is" } },
+      ],
+    })
+    .sort({ priority: -1 })
+    .limit(limit)
     .toArray() as Promise<Array<GuidelineDoc & { score?: number }>>;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export async function deactivate(col: Collection, title: string, domain?: string): Promise<number> {

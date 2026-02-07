@@ -1505,12 +1505,16 @@ const memoryMongoDBPlugin = {
           const configCount = await configCol.countDocuments();
 
           if (seedsCount === 0 || skillsCount === 0) {
-            const result = await migrator.seedStarters();
-            const totalInserted = result.seeds.inserted + result.skills.inserted;
-            if (totalInserted > 0) {
+            try {
               api.logger.info(
-                `memory-mongodb: auto-seeded starters (seeds: ${result.seeds.inserted}, skills: ${result.skills.inserted})`,
+                `memory-mongodb: seeds=${seedsCount} skills=${skillsCount}, running seedStarters...`,
               );
+              const result = await migrator.seedStarters();
+              api.logger.info(
+                `memory-mongodb: seedStarters done — seeds inserted=${result.seeds.inserted} skipped=${result.seeds.skipped}, skills inserted=${result.skills.inserted} skipped=${result.skills.skipped}`,
+              );
+            } catch (err) {
+              api.logger.warn(`memory-mongodb: seedStarters failed: ${String(err)}`);
             }
           }
 

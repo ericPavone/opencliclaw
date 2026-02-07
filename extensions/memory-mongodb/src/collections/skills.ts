@@ -68,14 +68,44 @@ export async function search(
   col: Collection,
   params: SearchParams,
 ): Promise<Array<SkillDoc & { score?: number }>> {
-  const query: Record<string, unknown> = { $text: { $search: params.query } };
-  if (params.activeOnly) query.active = true;
+  const limit = params.limit ?? 10;
+  const filter: Record<string, unknown> = {};
+  if (params.activeOnly) filter.active = true;
 
-  return col
-    .find(query, { projection: { score: { $meta: "textScore" } } })
+  const textResults = (await col
+    .find(
+      { ...filter, $text: { $search: params.query } },
+      { projection: { score: { $meta: "textScore" } } },
+    )
     .sort({ score: { $meta: "textScore" } })
-    .limit(params.limit ?? 10)
+    .limit(limit)
+    .toArray()) as Array<SkillDoc & { score?: number }>;
+
+  if (textResults.length > 0) return textResults;
+
+  const keywords = params.query
+    .split(/\s+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter((w) => w.length >= 3);
+  if (keywords.length === 0) return [];
+
+  const pattern = keywords.map((w) => `(?=.*${escapeRegex(w)})`).join("");
+  return col
+    .find({
+      ...filter,
+      $or: [
+        { name: { $regex: pattern, $options: "is" } },
+        { description: { $regex: pattern, $options: "is" } },
+        { prompt_base: { $regex: pattern, $options: "is" } },
+      ],
+    })
+    .sort({ updated_at: -1 })
+    .limit(limit)
     .toArray() as Promise<Array<SkillDoc & { score?: number }>>;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export async function getSkill(col: Collection, name: string): Promise<SkillDoc | null> {

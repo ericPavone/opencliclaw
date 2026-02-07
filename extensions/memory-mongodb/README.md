@@ -6,12 +6,13 @@ MongoDB-backed structured knowledge management plugin for OpenClaw. Replaces the
 
 - **6 Collections**: memories, guidelines, seeds, agent_config, skills, routing
 - **DB-First Bootstrap** (`dbFirst: true`): MongoDB replaces workspace files as the source of truth at agent bootstrap time
+- **Auto-seeding**: on first boot (empty collections), seeds starter knowledge (seeds, skills, agent_config) from embedded defaults — no disk dependency
 - **Dynamic Model Routing** (`routing.enabled: true`): per-message model selection based on prompt complexity (fast/mid/heavy tiers) with automatic tier escalation and circuit breaker
 - **Auto-recall**: automatically injects relevant memories into agent context based on conversation content
-- **Auto-capture**: detects memorable statements (preferences, decisions, entities) and stores them
+- **Auto-capture**: detects memorable statements (preferences, decisions, entities) and stores them — multilingual triggers (English, Italian)
 - **Agent config injection**: loads soul, identity, persona, instructions from MongoDB at every agent run (both API and CLI agents)
 - **CLI workspace bootstrap**: auto-generates TOOLS.md/BOOT.md sections when CLI models (e.g. `claude-cli`) are in config
-- **Text search**: MongoDB text indexes across all collections with relevance scoring
+- **Multilingual search**: text indexes use `default_language: "none"` (no stemmer bias) with automatic regex fallback when text search returns empty
 - **Migration tools**: migrate from workspace files (SOUL.md, MEMORY.md, daily logs, knowledge/) to MongoDB
 - **Agent tools**: `mongobrain_search`, `mongobrain_store`, `mongobrain_get`, `mongobrain_forget`, `mongobrain_skill_match`, `mongobrain_config_load`
 - **CLI commands**: `openclaw mongobrain status|search|store|get-config|get-skill|match-skill|export|prune|migrate|routing`
@@ -121,14 +122,14 @@ Unique on `agent_id`. Contains: `models[]` (tier + capabilities), `classificatio
 
 Available to API agents automatically. CLI agents (Claude Code) access via `openclaw mongobrain` CLI commands.
 
-| Tool                     | Description                                            |
-| ------------------------ | ------------------------------------------------------ |
-| `mongobrain_search`      | Search across one or all collections with text ranking |
-| `mongobrain_store`       | Store a document in any collection                     |
-| `mongobrain_get`         | Get a specific document by name/type                   |
-| `mongobrain_forget`      | Delete or deactivate a document                        |
-| `mongobrain_skill_match` | Find active skills matching a trigger keyword          |
-| `mongobrain_config_load` | Load all agent config sections (or a specific type)    |
+| Tool                     | Description                                                          |
+| ------------------------ | -------------------------------------------------------------------- |
+| `mongobrain_search`      | Search across one or all collections (text ranking + regex fallback) |
+| `mongobrain_store`       | Store a document in any collection                                   |
+| `mongobrain_get`         | Get a specific document by name/type                                 |
+| `mongobrain_forget`      | Delete or deactivate a document                                      |
+| `mongobrain_skill_match` | Find active skills matching a trigger keyword                        |
+| `mongobrain_config_load` | Load all agent config sections (or a specific type)                  |
 
 ## CLI Commands
 
@@ -249,6 +250,15 @@ When `routing.enabled: true`, correlates agent run outcomes with prior routing d
 
 When `autoCapture` is enabled, scans conversation messages for memorable patterns (preferences, decisions, entities, facts) and stores up to 3 per turn.
 
+### `service.start()` — Auto-Seed Collections
+
+On first boot (empty collections), automatically seeds:
+
+- **seeds + skills**: starter knowledge via `seedStarters()` (2 starter seeds + skill-builder skill) and `claude-code-ops` skill from `docs/db-snapshot/`
+- **agent_config**: 4 embedded defaults (soul, boot, tools, identity) — DB-first, no disk dependency
+
+This ensures a fresh MongoDB instance is immediately functional without requiring manual migration.
+
 ### `service.start()` — Workspace Bootstrap
 
 When any CLI model is detected in config (e.g. `claude-cli/opus`), auto-appends MongoBrain sections to TOOLS.md and BOOT.md in all workspace directories. Uses idempotent markers to avoid duplicates. Runs during plugin service startup (after gateway internal hooks are initialized).
@@ -259,7 +269,7 @@ When `routing.enabled: true`, seeds the `routing` collection from `docs/db-snaps
 
 ## Indexes
 
-Created automatically on first connection:
+Created automatically on first connection. All text indexes use `default_language: "none"` for multilingual support (no English stemmer bias). Existing indexes with conflicting options are automatically dropped and recreated on startup.
 
 - **memories**: text index on `content+summary+domain`, compound `domain+category`, multikey `tags`, TTL on `expires_at`
 - **guidelines**: text index on `title+content+domain`, compound `domain+task+active`, `priority`
@@ -280,13 +290,13 @@ openclaw.json
        └─ autoCapture: true      (auto-store from conversation)
 
 Gateway startup:
-  register() → lazy MongoClient init → create indexes (6 collections)
+  register() → lazy MongoClient init → create indexes (6 collections, multilingual)
   ├─ registerTool() × 6 (search, store, get, forget, skill_match, config_load)
   ├─ registerCli() → openclaw mongobrain * (incl. routing subcommands)
   ├─ on("agent:bootstrap") → DB-first file replace + MEMORY.md snapshot + skill injection
   ├─ on("before_agent_start") → routing override (escalation + circuit breaker) + agent_config + skill injection + auto-recall
   ├─ on("agent_end") → circuit breaker outcome tracking + auto-capture
-  └─ service.start() → workspace bootstrap + routing seed/discovery
+  └─ service.start() → auto-seed (seeds, skills, agent_config) + workspace bootstrap + routing seed/discovery
 
 Agent run (API):
   bootstrap hook → DB files replace workspace → before_agent_start → routing override

@@ -62,14 +62,44 @@ export async function search(
   col: Collection,
   params: SearchParams,
 ): Promise<Array<SeedDoc & { score?: number }>> {
-  const query: Record<string, unknown> = { $text: { $search: params.query } };
-  if (params.domain) query.domain = params.domain;
+  const limit = params.limit ?? 10;
+  const filter: Record<string, unknown> = {};
+  if (params.domain) filter.domain = params.domain;
 
-  return col
-    .find(query, { projection: { score: { $meta: "textScore" } } })
+  const textResults = (await col
+    .find(
+      { ...filter, $text: { $search: params.query } },
+      { projection: { score: { $meta: "textScore" } } },
+    )
     .sort({ score: { $meta: "textScore" } })
-    .limit(params.limit ?? 10)
+    .limit(limit)
+    .toArray()) as Array<SeedDoc & { score?: number }>;
+
+  if (textResults.length > 0) return textResults;
+
+  const keywords = params.query
+    .split(/\s+/)
+    .map((w) => w.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter((w) => w.length >= 3);
+  if (keywords.length === 0) return [];
+
+  const pattern = keywords.map((w) => `(?=.*${escapeRegex(w)})`).join("");
+  return col
+    .find({
+      ...filter,
+      $or: [
+        { content: { $regex: pattern, $options: "is" } },
+        { name: { $regex: pattern, $options: "is" } },
+        { description: { $regex: pattern, $options: "is" } },
+      ],
+    })
+    .sort({ updated_at: -1 })
+    .limit(limit)
     .toArray() as Promise<Array<SeedDoc & { score?: number }>>;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export async function exportAll(col: Collection, domain?: string): Promise<SeedDoc[]> {
