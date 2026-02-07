@@ -255,7 +255,7 @@ When `autoCapture` is enabled, scans conversation messages for memorable pattern
 On first boot (empty collections), automatically seeds:
 
 - **seeds + skills**: starter knowledge via `seedStarters()` (2 starter seeds + skill-builder skill) and `claude-code-ops` skill from `docs/db-snapshot/`
-- **agent_config**: 4 embedded defaults (soul, boot, tools, identity) — DB-first, no disk dependency
+- **agent_config**: 5 embedded defaults (soul, boot, tools, identity, bootstrap) — DB-first, no disk dependency. The `bootstrap` section triggers a first-run ritual (name, vibe, emoji) on new agents
 
 This ensures a fresh MongoDB instance is immediately functional without requiring manual migration.
 
