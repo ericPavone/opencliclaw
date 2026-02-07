@@ -4,7 +4,7 @@ import type {
   ClassificationConfig,
   RoutingRule,
 } from "./collections/routing.js";
-import { getModelByTier } from "./collections/routing.js";
+import { getModelByTierWithEscalation } from "./collections/routing.js";
 
 // ==========================================================================
 // Prompt Classification
@@ -92,6 +92,7 @@ export function resolveRoutingOverride(
   toolsInContext: boolean,
   logger?: PluginLogger,
   agentId?: string,
+  isModelHealthy?: (modelId: string) => boolean,
 ): RoutingDecision {
   const tag = agentId ? `agent=${agentId}` : "agent=default";
 
@@ -113,20 +114,25 @@ export function resolveRoutingOverride(
     // No rule matched — check ambiguous_action
     if (routingDoc.routing.ambiguous_action === "use_default") {
       const tier = routingDoc.routing.default_tier;
-      const model = getModelByTier(routingDoc, tier);
-      if (model) {
-        const reason = `no_rule_match, using default_tier=${tier}`;
+      const escalated = getModelByTierWithEscalation(
+        routingDoc,
+        tier,
+        toolsInContext,
+        isModelHealthy,
+      );
+      if (escalated) {
+        const reason = `no_rule_match, using default_tier=${tier}${escalated.tier !== tier ? ` (escalated→${escalated.tier})` : ""}`;
         logger?.info?.(
-          `routing: ${tag} category=${category} complexity=${complexity} tier=${tier} model=${model.id} reason="${reason}"`,
+          `routing: ${tag} category=${category} complexity=${complexity} tier=${escalated.tier} model=${escalated.model.id} reason="${reason}"`,
         );
         return {
           override: true,
-          provider: model.id.split("/")[0],
-          model: model.id.split("/").slice(1).join("/"),
+          provider: escalated.model.id.split("/")[0],
+          model: escalated.model.id.split("/").slice(1).join("/"),
           reason,
           category,
           complexity,
-          tier,
+          tier: escalated.tier,
         };
       }
     }
@@ -138,37 +144,29 @@ export function resolveRoutingOverride(
 
   const tier = matchedRule.then;
 
-  // 3. Capability check: if tools active, don't pick a model without tool support
-  if (toolsInContext) {
-    const candidate = getModelByTier(routingDoc, tier);
-    if (candidate && !candidate.capabilities.tools) {
-      const reason = `capability_mismatch: tier=${tier} model=${candidate.id} has tools=false but tools_in_context=true`;
-      logger?.info?.(`routing: ${tag} no_override reason="${reason}"`);
-      return { override: false, reason, category, complexity };
-    }
-  }
-
-  // 4. Select model from tier
-  const model = getModelByTier(routingDoc, tier);
-  if (!model) {
-    const reason = `no_model_in_tier=${tier}`;
+  // 3. Select model with escalation (handles capability check + health)
+  const escalated = getModelByTierWithEscalation(routingDoc, tier, toolsInContext, isModelHealthy);
+  if (!escalated) {
+    const reason = `all_tiers_exhausted starting_tier=${tier} tools=${toolsInContext}`;
     logger?.info?.(`routing: ${tag} no_override reason="${reason}"`);
     return { override: false, reason, category, complexity };
   }
 
-  const reason = matchedRule.reason ?? `rule: ${category}+tools=${toolsInContext}→${tier}`;
+  const reason = matchedRule.reason
+    ? `${matchedRule.reason}${escalated.tier !== tier ? ` (escalated ${tier}→${escalated.tier})` : ""}`
+    : `rule: ${category}+tools=${toolsInContext}→${escalated.tier}`;
 
   logger?.info?.(
-    `routing: ${tag} category=${category} complexity=${complexity} tier=${tier} model=${model.id} reason="${reason}"`,
+    `routing: ${tag} category=${category} complexity=${complexity} tier=${escalated.tier} model=${escalated.model.id} reason="${reason}"`,
   );
 
   return {
     override: true,
-    provider: model.id.split("/")[0],
-    model: model.id.split("/").slice(1).join("/"),
+    provider: escalated.model.id.split("/")[0],
+    model: escalated.model.id.split("/").slice(1).join("/"),
     reason,
     category,
     complexity,
-    tier,
+    tier: escalated.tier,
   };
 }

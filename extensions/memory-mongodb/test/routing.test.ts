@@ -200,7 +200,7 @@ describe("resolveRoutingOverride", () => {
     expect(result.override).toBe(true);
   });
 
-  it("blocks routing to tool-less model when tools are active", () => {
+  it("escalates past tool-less model when tools are active", () => {
     const doc = makeRoutingDoc({
       routing: {
         default_tier: "heavy",
@@ -209,12 +209,16 @@ describe("resolveRoutingOverride", () => {
         rules: [{ if: "CHAT", tools_in_context: true, then: "fast", priority: 1 }],
       },
     });
-    // fast tier model has tools: false, but tools_in_context is true → capability mismatch
+    // fast tier model has tools: false, but tools_in_context is true → escalates to mid
     const result = resolveRoutingOverride("hello", doc, true);
-    expect(result.override).toBe(false);
+    expect(result.override).toBe(true);
+    if (result.override) {
+      expect(result.tier).toBe("mid");
+      expect(result.provider).toBe("anthropic");
+    }
   });
 
-  it("returns no override when no model exists in target tier", () => {
+  it("escalates when no model exists in target tier", () => {
     const doc = makeRoutingDoc({
       models: [
         {
@@ -227,9 +231,12 @@ describe("resolveRoutingOverride", () => {
         },
       ],
     });
-    // CHAT without tools → fast tier, but no fast model exists
+    // CHAT without tools → fast tier, but no fast model → escalates to heavy
     const result = resolveRoutingOverride("hello", doc, false);
-    expect(result.override).toBe(false);
+    expect(result.override).toBe(true);
+    if (result.override) {
+      expect(result.tier).toBe("heavy");
+    }
   });
 
   it("uses default tier when ambiguous_action is use_default", () => {
@@ -259,8 +266,85 @@ describe("resolveRoutingOverride", () => {
     expect(logMsg).toContain("tier=fast");
   });
 
-  it("logs no_override decisions", () => {
+  it("logs no_override when all tiers exhausted", () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const doc = makeRoutingDoc({ models: [] });
+    resolveRoutingOverride("hello", doc, false, logger);
+    expect(logger.info).toHaveBeenCalled();
+    const logMsg = logger.info.mock.calls[0][0];
+    expect(logMsg).toContain("no_override");
+  });
+
+  // ========================================================================
+  // Escalation tests
+  // ========================================================================
+
+  it("escalates from fast to mid when fast model lacks tools", () => {
+    const doc = makeRoutingDoc({
+      routing: {
+        default_tier: "heavy",
+        ambiguous_action: "no_override",
+        capability_constraint: "",
+        rules: [{ if: "CHAT", tools_in_context: true, then: "fast", priority: 1 }],
+      },
+    });
+    // fast tier model has tools: false, but tools_in_context is true → should escalate to mid
+    const result = resolveRoutingOverride("hello", doc, true);
+    expect(result.override).toBe(true);
+    if (result.override) {
+      expect(result.provider).toBe("anthropic");
+      expect(result.model).toBe("claude-sonnet-4-5");
+      expect(result.tier).toBe("mid");
+    }
+  });
+
+  it("escalates when selected model is unhealthy", () => {
+    const doc = makeRoutingDoc();
+    const isHealthy = (id: string) => id !== "google/gemini-3-pro";
+    const result = resolveRoutingOverride(
+      "ciao come stai?",
+      doc,
+      false,
+      undefined,
+      undefined,
+      isHealthy,
+    );
+    expect(result.override).toBe(true);
+    if (result.override) {
+      expect(result.provider).toBe("anthropic");
+      expect(result.model).toBe("claude-sonnet-4-5");
+      expect(result.tier).toBe("mid");
+    }
+  });
+
+  it("returns no_override when all models are unhealthy", () => {
+    const doc = makeRoutingDoc();
+    const allUnhealthy = () => false;
+    const result = resolveRoutingOverride("ciao", doc, false, undefined, undefined, allUnhealthy);
+    expect(result.override).toBe(false);
+    if (!result.override) {
+      expect(result.reason).toContain("all_tiers_exhausted");
+    }
+  });
+
+  it("escalation includes reason with tier info", () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const doc = makeRoutingDoc({
+      routing: {
+        default_tier: "heavy",
+        ambiguous_action: "no_override",
+        capability_constraint: "",
+        rules: [{ if: "CHAT", tools_in_context: true, then: "fast", priority: 1 }],
+      },
+    });
+    const result = resolveRoutingOverride("hello", doc, true, logger);
+    expect(result.override).toBe(true);
+    if (result.override) {
+      expect(result.reason).toContain("→");
+    }
+  });
+
+  it("use_default also escalates when tier is empty", () => {
     const doc = makeRoutingDoc({
       models: [
         {
@@ -272,10 +356,18 @@ describe("resolveRoutingOverride", () => {
           never_when: [],
         },
       ],
+      routing: {
+        default_tier: "fast",
+        ambiguous_action: "use_default",
+        capability_constraint: "",
+        rules: [],
+      },
     });
-    resolveRoutingOverride("hello", doc, false, logger);
-    expect(logger.info).toHaveBeenCalled();
-    const logMsg = logger.info.mock.calls[0][0];
-    expect(logMsg).toContain("no_override");
+    const result = resolveRoutingOverride("anything", doc, false);
+    expect(result.override).toBe(true);
+    if (result.override) {
+      expect(result.tier).toBe("heavy");
+      expect(result.reason).toContain("escalated");
+    }
   });
 });

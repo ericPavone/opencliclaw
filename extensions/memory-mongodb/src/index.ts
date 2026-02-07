@@ -20,6 +20,7 @@ import * as skills from "./collections/skills.js";
 import { mongodbConfigSchema } from "./config.js";
 import { MongoMemoryDB, ALL_COLLECTIONS, type CollectionName } from "./db.js";
 import { createMigrator } from "./migrate.js";
+import { ProviderHealthTracker } from "./provider-health.js";
 import { resolveRoutingOverride } from "./routing.js";
 
 const COLLECTION_NAMES = ["memories", "guidelines", "seeds", "config", "skills"] as const;
@@ -1177,6 +1178,38 @@ const memoryMongoDBPlugin = {
               ),
             );
           });
+
+        routingCmd
+          .command("health")
+          .description("Show circuit breaker health status for all models")
+          .action(() => {
+            const snapshot = healthTracker.snapshot();
+            if (Object.keys(snapshot).length === 0) {
+              console.log(
+                JSON.stringify(
+                  { status: "no_data", message: "No health events recorded yet" },
+                  null,
+                  2,
+                ),
+              );
+              return;
+            }
+            console.log(JSON.stringify(snapshot, null, 2));
+          });
+
+        routingCmd
+          .command("reset-health")
+          .description("Reset circuit breaker state")
+          .option("--model <id>", "Reset a specific model (otherwise resets all)")
+          .action((opts: { model?: string }) => {
+            if (opts.model) {
+              healthTracker.resetModel(opts.model);
+              console.log(JSON.stringify({ action: "reset", model: opts.model }, null, 2));
+            } else {
+              healthTracker.resetAll();
+              console.log(JSON.stringify({ action: "reset_all" }, null, 2));
+            }
+          });
       },
       { commands: ["mongobrain"] },
     );
@@ -1310,6 +1343,7 @@ const memoryMongoDBPlugin = {
     // ========================================================================
 
     const routingCache = new RoutingCache(cfg.routing.cacheTtlMs);
+    const healthTracker = new ProviderHealthTracker(cfg.routing.circuitBreaker);
 
     if (cfg.routing.enabled) {
       // Per-message routing override
@@ -1332,9 +1366,14 @@ const memoryMongoDBPlugin = {
               toolsInContext,
               api.logger,
               cfg.agentId,
+              healthTracker.isHealthy.bind(healthTracker),
             );
 
             if (decision.override) {
+              const sessionKey = (ctx as Record<string, unknown>).sessionKey as string | undefined;
+              if (sessionKey) {
+                healthTracker.recordDecision(sessionKey, `${decision.provider}/${decision.model}`);
+              }
               return {
                 modelOverride: {
                   provider: decision.provider,
@@ -1349,6 +1388,23 @@ const memoryMongoDBPlugin = {
         },
         { priority: 5 },
       );
+
+      // Record outcome for circuit breaker
+      api.on("agent_end", async (event, ctx) => {
+        const sessionKey = (ctx as Record<string, unknown>).sessionKey as string | undefined;
+        if (!sessionKey) return;
+        const ev = event as Record<string, unknown>;
+        healthTracker.recordOutcome(
+          sessionKey,
+          ev.success === true,
+          typeof ev.error === "string" ? ev.error : undefined,
+        );
+        if (ev.success === false && typeof ev.error === "string") {
+          api.logger.warn(
+            `memory-mongodb: agent run failed: ${(ev.error as string).slice(0, 200)}`,
+          );
+        }
+      });
     }
 
     // ========================================================================

@@ -115,6 +115,7 @@ describe("mongodbConfigSchema.parse", () => {
       enabled: false,
       defaultTier: "heavy",
       cacheTtlMs: 60_000,
+      circuitBreaker: { failureThreshold: 3, cooldownMs: 300_000, windowMs: 600_000 },
     });
   });
 

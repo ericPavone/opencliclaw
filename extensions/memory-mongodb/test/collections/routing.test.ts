@@ -3,6 +3,7 @@ import {
   getRoutingContext,
   storeRoutingContext,
   getModelByTier,
+  getModelByTierWithEscalation,
   RoutingCache,
   normalizeProviderId,
   parseModelRef,
@@ -79,6 +80,37 @@ describe("routing CRUD", () => {
       escalation: { triggers: [], de_escalation_triggers: [] },
     });
     expect(result.action).toBe("updated");
+  });
+
+  it("storeRoutingContext strips _id, created_at, updated_at from $set", async () => {
+    const updateFn = vi.fn().mockResolvedValue({ upsertedId: null });
+    const col = mockCollection({ updateOne: updateFn });
+
+    // Simulate passing a doc read from DB (which has _id, created_at, updated_at)
+    const docFromDb = {
+      _id: "some-object-id",
+      agent_id: "default",
+      version: 5,
+      models: [],
+      created_at: new Date("2025-01-01"),
+      updated_at: new Date("2025-01-02"),
+      classification: { categories: {}, indicators: {}, path_patterns: [], code_block_regex: "" },
+      routing: {
+        default_tier: "heavy",
+        ambiguous_action: "no_override",
+        capability_constraint: "",
+        rules: [],
+      },
+      escalation: { triggers: [], de_escalation_triggers: [] },
+    } as any;
+
+    await storeRoutingContext(col, docFromDb);
+    const updateCall = updateFn.mock.calls[0];
+    const setPayload = updateCall[1].$set;
+    expect(setPayload._id).toBeUndefined();
+    expect(setPayload.created_at).toBeUndefined();
+    expect(setPayload.agent_id).toBe("default");
+    expect(setPayload.updated_at).toBeInstanceOf(Date);
   });
 });
 
@@ -543,6 +575,218 @@ describe("mergeModelsIncremental", () => {
     expect(merged).toHaveLength(3);
     const xy = merged.find((m) => m.id === "x/y");
     expect(xy).toBeDefined();
+  });
+});
+
+// ============================================================================
+// getModelByTierWithEscalation
+// ============================================================================
+
+describe("getModelByTierWithEscalation", () => {
+  const doc = {
+    models: [
+      {
+        id: "google/gemini-3-pro",
+        alias: "gemini-3-pro",
+        tier: "fast" as const,
+        capabilities: {
+          tools: false,
+          filesystem: false,
+          code_execution: false,
+          reasoning: "light" as const,
+        },
+        use_when: [],
+        never_when: [],
+      },
+      {
+        id: "anthropic/claude-sonnet-4-5",
+        alias: "claude-sonnet-4-5",
+        tier: "mid" as const,
+        capabilities: {
+          tools: true,
+          filesystem: true,
+          code_execution: true,
+          reasoning: "standard" as const,
+        },
+        use_when: [],
+        never_when: [],
+      },
+      {
+        id: "anthropic/claude-opus-4-6",
+        alias: "claude-opus-4-6",
+        tier: "heavy" as const,
+        capabilities: {
+          tools: true,
+          filesystem: true,
+          code_execution: true,
+          reasoning: "deep" as const,
+        },
+        use_when: [],
+        never_when: [],
+      },
+    ],
+  } as unknown as RoutingContextDoc;
+
+  it("returns model at requested tier when available", () => {
+    const result = getModelByTierWithEscalation(doc, "fast", false);
+    expect(result).not.toBeNull();
+    expect(result!.model.id).toBe("google/gemini-3-pro");
+    expect(result!.tier).toBe("fast");
+  });
+
+  it("escalates from fast to mid when fast has no tools and tools required", () => {
+    const result = getModelByTierWithEscalation(doc, "fast", true);
+    expect(result).not.toBeNull();
+    expect(result!.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(result!.tier).toBe("mid");
+  });
+
+  it("escalates from fast to heavy when mid also lacks tools", () => {
+    const noToolsDoc = {
+      models: [
+        {
+          id: "google/gemini-3-pro",
+          alias: "gemini-3-pro",
+          tier: "fast" as const,
+          capabilities: {
+            tools: false,
+            filesystem: false,
+            code_execution: false,
+            reasoning: "light" as const,
+          },
+          use_when: [],
+          never_when: [],
+        },
+        {
+          id: "some/mid-model",
+          alias: "mid-model",
+          tier: "mid" as const,
+          capabilities: {
+            tools: false,
+            filesystem: false,
+            code_execution: false,
+            reasoning: "standard" as const,
+          },
+          use_when: [],
+          never_when: [],
+        },
+        {
+          id: "anthropic/claude-opus-4-6",
+          alias: "claude-opus-4-6",
+          tier: "heavy" as const,
+          capabilities: {
+            tools: true,
+            filesystem: true,
+            code_execution: true,
+            reasoning: "deep" as const,
+          },
+          use_when: [],
+          never_when: [],
+        },
+      ],
+    } as unknown as RoutingContextDoc;
+
+    const result = getModelByTierWithEscalation(noToolsDoc, "fast", true);
+    expect(result).not.toBeNull();
+    expect(result!.model.id).toBe("anthropic/claude-opus-4-6");
+    expect(result!.tier).toBe("heavy");
+  });
+
+  it("returns null when all tiers exhausted", () => {
+    const emptyDoc = { models: [] } as unknown as RoutingContextDoc;
+    expect(getModelByTierWithEscalation(emptyDoc, "fast", false)).toBeNull();
+  });
+
+  it("skips inactive models during escalation", () => {
+    const inactiveDoc = {
+      models: [
+        {
+          id: "google/gemini-3-pro",
+          alias: "gemini-3-pro",
+          tier: "fast" as const,
+          active: false,
+          capabilities: {
+            tools: false,
+            filesystem: false,
+            code_execution: false,
+            reasoning: "light" as const,
+          },
+          use_when: [],
+          never_when: [],
+        },
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          alias: "claude-sonnet-4-5",
+          tier: "mid" as const,
+          capabilities: {
+            tools: true,
+            filesystem: true,
+            code_execution: true,
+            reasoning: "standard" as const,
+          },
+          use_when: [],
+          never_when: [],
+        },
+      ],
+    } as unknown as RoutingContextDoc;
+
+    const result = getModelByTierWithEscalation(inactiveDoc, "fast", false);
+    expect(result!.tier).toBe("mid");
+  });
+
+  it("respects health check callback", () => {
+    const unhealthy = (id: string) => id !== "google/gemini-3-pro";
+    const result = getModelByTierWithEscalation(doc, "fast", false, unhealthy);
+    expect(result).not.toBeNull();
+    expect(result!.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(result!.tier).toBe("mid");
+  });
+
+  it("returns null when all models are unhealthy", () => {
+    const allUnhealthy = () => false;
+    expect(getModelByTierWithEscalation(doc, "fast", false, allUnhealthy)).toBeNull();
+  });
+
+  it("does not escalate below starting tier (heavy stays heavy)", () => {
+    const result = getModelByTierWithEscalation(doc, "heavy", false);
+    expect(result!.tier).toBe("heavy");
+  });
+
+  it("mid escalates to heavy only", () => {
+    const noMidDoc = {
+      models: [
+        {
+          id: "google/gemini-3-pro",
+          alias: "gemini-3-pro",
+          tier: "fast" as const,
+          capabilities: {
+            tools: false,
+            filesystem: false,
+            code_execution: false,
+            reasoning: "light" as const,
+          },
+          use_when: [],
+          never_when: [],
+        },
+        {
+          id: "anthropic/claude-opus-4-6",
+          alias: "claude-opus-4-6",
+          tier: "heavy" as const,
+          capabilities: {
+            tools: true,
+            filesystem: true,
+            code_execution: true,
+            reasoning: "deep" as const,
+          },
+          use_when: [],
+          never_when: [],
+        },
+      ],
+    } as unknown as RoutingContextDoc;
+
+    const result = getModelByTierWithEscalation(noMidDoc, "mid", false);
+    expect(result!.model.id).toBe("anthropic/claude-opus-4-6");
+    expect(result!.tier).toBe("heavy");
   });
 });
 

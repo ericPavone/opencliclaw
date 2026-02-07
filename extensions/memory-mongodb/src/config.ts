@@ -4,10 +4,17 @@ export type TlsConfig = {
   allowInvalidCerts?: boolean;
 };
 
+export type CircuitBreakerConfig = {
+  failureThreshold: number;
+  cooldownMs: number;
+  windowMs: number;
+};
+
 export type RoutingConfig = {
   enabled: boolean;
   defaultTier: string;
   cacheTtlMs: number;
+  circuitBreaker: CircuitBreakerConfig;
 };
 
 export type MongoDBConfig = {
@@ -31,7 +38,8 @@ const ALLOWED_TOP_KEYS = [
   "dbFirst",
   "routing",
 ];
-const ALLOWED_ROUTING_KEYS = ["enabled", "defaultTier", "cacheTtlMs"];
+const ALLOWED_ROUTING_KEYS = ["enabled", "defaultTier", "cacheTtlMs", "circuitBreaker"];
+const ALLOWED_CB_KEYS = ["failureThreshold", "cooldownMs", "windowMs"];
 const ALLOWED_TLS_KEYS = ["caFile", "certKeyFile", "allowInvalidCerts"];
 
 function resolveEnvVars(value: string): string {
@@ -78,17 +86,52 @@ export const mongodbConfigSchema = {
       };
     }
 
-    let routing: RoutingConfig = { enabled: false, defaultTier: "heavy", cacheTtlMs: 60_000 };
+    const defaultCb: CircuitBreakerConfig = {
+      failureThreshold: 3,
+      cooldownMs: 300_000,
+      windowMs: 600_000,
+    };
+    let routing: RoutingConfig = {
+      enabled: false,
+      defaultTier: "heavy",
+      cacheTtlMs: 60_000,
+      circuitBreaker: defaultCb,
+    };
     if (cfg.routing != null) {
       if (typeof cfg.routing !== "object" || Array.isArray(cfg.routing)) {
         throw new Error("routing must be an object");
       }
       const rc = cfg.routing as Record<string, unknown>;
       assertAllowedKeys(rc, ALLOWED_ROUTING_KEYS, "routing config");
+
+      let cb = defaultCb;
+      if (rc.circuitBreaker != null) {
+        if (typeof rc.circuitBreaker !== "object" || Array.isArray(rc.circuitBreaker)) {
+          throw new Error("circuitBreaker must be an object");
+        }
+        const raw = rc.circuitBreaker as Record<string, unknown>;
+        assertAllowedKeys(raw, ALLOWED_CB_KEYS, "circuitBreaker config");
+        cb = {
+          failureThreshold:
+            typeof raw.failureThreshold === "number" && raw.failureThreshold > 0
+              ? raw.failureThreshold
+              : defaultCb.failureThreshold,
+          cooldownMs:
+            typeof raw.cooldownMs === "number" && raw.cooldownMs > 0
+              ? raw.cooldownMs
+              : defaultCb.cooldownMs,
+          windowMs:
+            typeof raw.windowMs === "number" && raw.windowMs > 0
+              ? raw.windowMs
+              : defaultCb.windowMs,
+        };
+      }
+
       routing = {
         enabled: rc.enabled === true,
         defaultTier: typeof rc.defaultTier === "string" ? rc.defaultTier : "heavy",
         cacheTtlMs: typeof rc.cacheTtlMs === "number" && rc.cacheTtlMs > 0 ? rc.cacheTtlMs : 60_000,
+        circuitBreaker: cb,
       };
     }
 

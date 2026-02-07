@@ -103,10 +103,11 @@ export async function storeRoutingContext(
 ): Promise<{ action: "created" | "updated" }> {
   const now = new Date();
   const filter = { agent_id: doc.agent_id };
+  const { _id, created_at, updated_at, ...clean } = doc as Record<string, unknown>;
   const result = await col.updateOne(
     filter,
     {
-      $set: { ...doc, updated_at: now },
+      $set: { ...clean, updated_at: now },
       $setOnInsert: { created_at: now },
     },
     { upsert: true },
@@ -117,6 +118,33 @@ export async function storeRoutingContext(
 export function getModelByTier(doc: RoutingContextDoc, tier: string): RoutingModel | null {
   const eligible = doc.models.filter((m) => m.tier === tier && m.active !== false);
   return eligible[0] ?? null;
+}
+
+const TIER_ESCALATION: Record<string, string[]> = {
+  fast: ["fast", "mid", "heavy"],
+  mid: ["mid", "heavy"],
+  heavy: ["heavy"],
+};
+
+export type EscalationResult = { model: RoutingModel; tier: string } | null;
+
+export function getModelByTierWithEscalation(
+  doc: RoutingContextDoc,
+  startTier: string,
+  requireTools: boolean,
+  isModelHealthy?: (modelId: string) => boolean,
+): EscalationResult {
+  const chain = TIER_ESCALATION[startTier] ?? [startTier];
+  for (const tier of chain) {
+    const candidates = doc.models.filter((m) => {
+      if (m.tier !== tier || m.active === false) return false;
+      if (requireTools && !m.capabilities.tools) return false;
+      if (isModelHealthy && !isModelHealthy(m.id)) return false;
+      return true;
+    });
+    if (candidates.length > 0) return { model: candidates[0], tier };
+  }
+  return null;
 }
 
 // ==========================================================================

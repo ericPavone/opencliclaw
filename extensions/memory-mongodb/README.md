@@ -6,7 +6,7 @@ MongoDB-backed structured knowledge management plugin for OpenClaw. Replaces the
 
 - **6 Collections**: memories, guidelines, seeds, agent_config, skills, routing
 - **DB-First Bootstrap** (`dbFirst: true`): MongoDB replaces workspace files as the source of truth at agent bootstrap time
-- **Dynamic Model Routing** (`routing.enabled: true`): per-message model selection based on prompt complexity (fast/mid/heavy tiers)
+- **Dynamic Model Routing** (`routing.enabled: true`): per-message model selection based on prompt complexity (fast/mid/heavy tiers) with automatic tier escalation and circuit breaker
 - **Auto-recall**: automatically injects relevant memories into agent context based on conversation content
 - **Auto-capture**: detects memorable statements (preferences, decisions, entities) and stores them
 - **Agent config injection**: loads soul, identity, persona, instructions from MongoDB at every agent run (both API and CLI agents)
@@ -61,20 +61,23 @@ openclaw mongobrain status
 
 ## Configuration
 
-| Key                     | Type    | Default           | Description                                                 |
-| ----------------------- | ------- | ----------------- | ----------------------------------------------------------- |
-| `uri`                   | string  | _required_        | MongoDB connection URI (supports `${ENV_VAR}` substitution) |
-| `database`              | string  | `openclaw_memory` | Database name                                               |
-| `agentId`               | string  | `default`         | Agent ID for scoped config/data                             |
-| `autoRecall`            | boolean | `true`            | Auto-inject relevant memories into agent context            |
-| `autoCapture`           | boolean | `true`            | Auto-detect and store memorable statements                  |
-| `dbFirst`               | boolean | `false`           | Use MongoDB as source of truth for workspace files          |
-| `routing.enabled`       | boolean | `false`           | Enable dynamic per-message model routing                    |
-| `routing.defaultTier`   | string  | `heavy`           | Fallback tier when no routing rule matches                  |
-| `routing.cacheTtlMs`    | number  | `60000`           | Routing context cache TTL in milliseconds                   |
-| `tls.caFile`            | string  | -                 | CA certificate file path                                    |
-| `tls.certKeyFile`       | string  | -                 | Client cert/key file path                                   |
-| `tls.allowInvalidCerts` | boolean | `false`           | Skip TLS certificate validation                             |
+| Key                                       | Type    | Default           | Description                                                 |
+| ----------------------------------------- | ------- | ----------------- | ----------------------------------------------------------- |
+| `uri`                                     | string  | _required_        | MongoDB connection URI (supports `${ENV_VAR}` substitution) |
+| `database`                                | string  | `openclaw_memory` | Database name                                               |
+| `agentId`                                 | string  | `default`         | Agent ID for scoped config/data                             |
+| `autoRecall`                              | boolean | `true`            | Auto-inject relevant memories into agent context            |
+| `autoCapture`                             | boolean | `true`            | Auto-detect and store memorable statements                  |
+| `dbFirst`                                 | boolean | `false`           | Use MongoDB as source of truth for workspace files          |
+| `routing.enabled`                         | boolean | `false`           | Enable dynamic per-message model routing                    |
+| `routing.defaultTier`                     | string  | `heavy`           | Fallback tier when no routing rule matches                  |
+| `routing.cacheTtlMs`                      | number  | `60000`           | Routing context cache TTL in milliseconds                   |
+| `routing.circuitBreaker.failureThreshold` | number  | `3`               | Consecutive failures before opening circuit                 |
+| `routing.circuitBreaker.cooldownMs`       | number  | `300000`          | Cooldown (ms) before retrying an open circuit               |
+| `routing.circuitBreaker.windowMs`         | number  | `600000`          | Window (ms) for counting consecutive failures               |
+| `tls.caFile`                              | string  | -                 | CA certificate file path                                    |
+| `tls.certKeyFile`                         | string  | -                 | Client cert/key file path                                   |
+| `tls.allowInvalidCerts`                   | boolean | `false`           | Skip TLS certificate validation                             |
 
 ## Collections
 
@@ -181,6 +184,13 @@ openclaw mongobrain routing test --prompt "ciao come stai?" --tools
 
 # Delete routing context (re-seeds on next gateway restart)
 openclaw mongobrain routing reset
+
+# Show circuit breaker health status for all models
+openclaw mongobrain routing health
+
+# Reset circuit breaker state (all models or a specific one)
+openclaw mongobrain routing reset-health
+openclaw mongobrain routing reset-health --model google/gemini-3-pro
 ```
 
 All routing commands accept `--agent-id <id>` for multi-agent setups (defaults to `default`).
@@ -212,7 +222,12 @@ When `dbFirst: true`, intercepts agent bootstrap and replaces workspace file con
 
 ### `before_agent_start` (priority 5) — Dynamic Model Routing
 
-When `routing.enabled: true`, classifies the user prompt (CHAT/QUICK/TOOL/CODE/PLAN), matches routing rules, and returns a `modelOverride` to redirect the agent to the optimal model tier. Respects capability constraints (won't route to a tool-less model when tools are active).
+When `routing.enabled: true`, classifies the user prompt (CHAT/QUICK/TOOL/CODE/PLAN), matches routing rules, and returns a `modelOverride` to redirect the agent to the optimal model tier. Features:
+
+- **Tier escalation**: if no eligible model exists in the target tier, automatically escalates through the chain `fast → mid → heavy`
+- **Capability filtering**: won't route to a tool-less model when tools are active in context
+- **Circuit breaker**: skips models whose provider is in "open" state (too many consecutive failures); allows retry after cooldown (half-open)
+- Records routing decisions for circuit breaker correlation
 
 ### `before_agent_start` (priority 10) — Agent Config Injection
 
@@ -226,17 +241,21 @@ When `dbFirst: true`, matches skills from DB by trigger keywords in the prompt a
 
 When `autoRecall` is enabled, searches the `memories` collection using the user's prompt and injects up to 3 relevant memories as `<relevant-memories>` prepended context.
 
+### `agent_end` — Circuit Breaker Outcome Tracking
+
+When `routing.enabled: true`, correlates agent run outcomes with prior routing decisions. On failure, increments the consecutive failure counter for the routed model. On success, resets the counter. This feeds the circuit breaker: after `failureThreshold` consecutive failures, the model is temporarily blocked (open state) until the cooldown expires.
+
 ### `agent_end` — Auto-Capture
 
 When `autoCapture` is enabled, scans conversation messages for memorable patterns (preferences, decisions, entities, facts) and stores up to 3 per turn.
 
-### `gateway_start` — Workspace Bootstrap
+### `service.start()` — Workspace Bootstrap
 
-When any CLI model is detected in config (e.g. `claude-cli/opus`), auto-appends MongoBrain sections to TOOLS.md and BOOT.md in all workspace directories. Uses idempotent markers to avoid duplicates.
+When any CLI model is detected in config (e.g. `claude-cli/opus`), auto-appends MongoBrain sections to TOOLS.md and BOOT.md in all workspace directories. Uses idempotent markers to avoid duplicates. Runs during plugin service startup (after gateway internal hooks are initialized).
 
-### `gateway_start` — Routing Seed & Discovery
+### `service.start()` — Routing Seed & Discovery
 
-When `routing.enabled: true`, seeds the `routing` collection from `docs/db-snapshot/routing--default.json` on first boot. On subsequent restarts, compares a hash of discovered models against the stored hash and performs incremental merge (preserving user edits to tiers/rules while adding new models and marking removed ones as inactive).
+When `routing.enabled: true`, seeds the `routing` collection from `docs/db-snapshot/routing--default.json` on first boot. On subsequent restarts, compares a hash of discovered models against the stored hash and performs incremental merge (preserving user edits to tiers/rules while adding new models and marking removed ones as inactive). Runs during plugin service startup.
 
 ## Indexes
 
@@ -265,9 +284,9 @@ Gateway startup:
   ├─ registerTool() × 6 (search, store, get, forget, skill_match, config_load)
   ├─ registerCli() → openclaw mongobrain * (incl. routing subcommands)
   ├─ on("agent:bootstrap") → DB-first file replace + MEMORY.md snapshot + skill injection
-  ├─ on("before_agent_start") → routing override + agent_config + skill injection + auto-recall
-  ├─ on("agent_end") → auto-capture
-  └─ on("gateway_start") → workspace bootstrap + routing seed/discovery
+  ├─ on("before_agent_start") → routing override (escalation + circuit breaker) + agent_config + skill injection + auto-recall
+  ├─ on("agent_end") → circuit breaker outcome tracking + auto-capture
+  └─ service.start() → workspace bootstrap + routing seed/discovery
 
 Agent run (API):
   bootstrap hook → DB files replace workspace → before_agent_start → routing override
