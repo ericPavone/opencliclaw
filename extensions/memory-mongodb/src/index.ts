@@ -1303,18 +1303,22 @@ const memoryMongoDBPlugin = {
     // CLI Workspace Bootstrap (TOOLS.md + BOOT.md)
     // ========================================================================
 
-    api.on("gateway_start", async () => {
-      try {
-        if (!hasAnyCliModel(api.config)) return;
+    api.registerHook(
+      "gateway:startup",
+      async () => {
+        try {
+          if (!hasAnyCliModel(api.config)) return;
 
-        const workspaceDirs = resolveWorkspaceDirs(api.config);
-        for (const wsDir of workspaceDirs) {
-          await ensureMongobrainWorkspaceFiles(wsDir, api.logger);
+          const workspaceDirs = resolveWorkspaceDirs(api.config);
+          for (const wsDir of workspaceDirs) {
+            await ensureMongobrainWorkspaceFiles(wsDir, api.logger);
+          }
+        } catch (err) {
+          api.logger.warn(`memory-mongodb: workspace bootstrap failed: ${String(err)}`);
         }
-      } catch (err) {
-        api.logger.warn(`memory-mongodb: workspace bootstrap failed: ${String(err)}`);
-      }
-    });
+      },
+      { name: "memory-mongodb:workspace-bootstrap" },
+    );
 
     // ========================================================================
     // DB-First Bootstrap (agent:bootstrap hook + skill injection)
@@ -1330,53 +1334,57 @@ const memoryMongoDBPlugin = {
 
     if (cfg.routing.enabled) {
       // Seed routing context at gateway startup
-      api.on("gateway_start", async () => {
-        try {
-          const col = await db.getCollection("routing");
-          const existing = await getRoutingContext(col, cfg.agentId);
+      api.registerHook(
+        "gateway:startup",
+        async () => {
+          try {
+            const col = await db.getCollection("routing");
+            const existing = await getRoutingContext(col, cfg.agentId);
 
-          // Load seed defaults
-          const seedUrl = new URL("../docs/db-snapshot/routing--default.json", import.meta.url);
-          const seedRaw = await fs.readFile(seedUrl, "utf-8");
-          const seed = JSON.parse(seedRaw);
+            // Load seed defaults
+            const seedUrl = new URL("../docs/db-snapshot/routing--default.json", import.meta.url);
+            const seedRaw = await fs.readFile(seedUrl, "utf-8");
+            const seed = JSON.parse(seedRaw);
 
-          const heuristics = seed.model_discovery?.tier_heuristics ?? {};
-          const discovered = discoverModels(api.config, cfg.agentId, heuristics);
-          const newHash = computeModelsHash(discovered);
+            const heuristics = seed.model_discovery?.tier_heuristics ?? {};
+            const discovered = discoverModels(api.config, cfg.agentId, heuristics);
+            const newHash = computeModelsHash(discovered);
 
-          if (!existing) {
-            // First boot: seed + discover models
-            await storeRoutingContext(col, {
-              agent_id: cfg.agentId,
-              version: seed.version ?? 5,
-              models: discovered,
-              models_hash: newHash,
-              model_discovery: seed.model_discovery,
-              classification: seed.classification,
-              routing: seed.routing,
-              escalation: seed.escalation,
-            });
-            api.logger.info(
-              `memory-mongodb: routing_context initialized (${discovered.length} models discovered)`,
-            );
-          } else if (existing.models_hash !== newHash) {
-            // Config changed: incremental re-discovery
-            const merged = mergeModelsIncremental(existing.models, discovered);
-            await storeRoutingContext(col, {
-              ...existing,
-              models: merged,
-              models_hash: newHash,
-            });
-            routingCache.invalidate(cfg.agentId);
-            const added = merged.length - existing.models.length;
-            api.logger.info(
-              `memory-mongodb: routing re-discovery (${added >= 0 ? "added" : "removed"} ${Math.abs(added)} models)`,
-            );
+            if (!existing) {
+              // First boot: seed + discover models
+              await storeRoutingContext(col, {
+                agent_id: cfg.agentId,
+                version: seed.version ?? 5,
+                models: discovered,
+                models_hash: newHash,
+                model_discovery: seed.model_discovery,
+                classification: seed.classification,
+                routing: seed.routing,
+                escalation: seed.escalation,
+              });
+              api.logger.info(
+                `memory-mongodb: routing_context initialized (${discovered.length} models discovered)`,
+              );
+            } else if (existing.models_hash !== newHash) {
+              // Config changed: incremental re-discovery
+              const merged = mergeModelsIncremental(existing.models, discovered);
+              await storeRoutingContext(col, {
+                ...existing,
+                models: merged,
+                models_hash: newHash,
+              });
+              routingCache.invalidate(cfg.agentId);
+              const added = merged.length - existing.models.length;
+              api.logger.info(
+                `memory-mongodb: routing re-discovery (${added >= 0 ? "added" : "removed"} ${Math.abs(added)} models)`,
+              );
+            }
+          } catch (err) {
+            api.logger.warn(`memory-mongodb: routing seed failed: ${String(err)}`);
           }
-        } catch (err) {
-          api.logger.warn(`memory-mongodb: routing seed failed: ${String(err)}`);
-        }
-      });
+        },
+        { name: "memory-mongodb:routing-seed" },
+      );
 
       // Per-message routing override
       api.on(
